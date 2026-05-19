@@ -1,6 +1,3 @@
-<img width="575" height="95" alt="Screenshot 2026-05-19 at 3 23 28 PM" src="https://github.com/user-attachments/assets/f63a178b-3bbe-4190-93fa-2ae05200cbb5" />
-
-
 # The Maxx Report
 
 Local telemetry for extremely normal AI usage.
