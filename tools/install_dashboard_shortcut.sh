@@ -4,7 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="$SCRIPT_DIR/update_dashboard.sh"
 BIN_DIR="$HOME/.local/bin"
-COMMAND_PATH="$BIN_DIR/dashboard"
+COMMAND_NAME="${DASHBOARD_COMMAND_NAME:-maxxreport}"
+COMMAND_PATH="$BIN_DIR/$COMMAND_NAME"
 
 if [[ ! -f "$TARGET" ]]; then
   echo "error: expected updater at $TARGET" >&2
@@ -25,5 +26,5 @@ mkdir -p "$BIN_DIR"
 
 chmod +x "$COMMAND_PATH"
 
-echo "Installed dashboard shortcut at $COMMAND_PATH"
+echo "Installed $COMMAND_NAME shortcut at $COMMAND_PATH"
 echo "It points to $TARGET"

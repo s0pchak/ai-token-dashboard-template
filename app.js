@@ -50,7 +50,6 @@ const els = {
   chart: document.querySelector("#dailyChart"),
   tooltip: document.querySelector("#chartTooltip"),
   dailyRows: document.querySelector("#dailyRows"),
-  modelLegend: document.querySelector("#modelLegend"),
   modelMix: document.querySelector("#modelMix"),
   captureMeta: document.querySelector("#captureMeta"),
   heroTotal: document.querySelector("#heroTotal"),
@@ -147,6 +146,12 @@ function durationLabel(seconds = 0) {
   const hours = Math.floor(minutes / 60);
   const r = minutes % 60;
   return r ? `${hours}h ${r}m` : `${hours}h`;
+}
+
+function durationHoursLabel(seconds = 0) {
+  const hours = Math.round(Number(seconds || 0) / 3600);
+  if (hours < 1) return durationLabel(seconds);
+  return `${hours} ${hours === 1 ? "hour" : "hours"}`;
 }
 
 function percentLabel(value = 0, total = 0) {
@@ -250,7 +255,9 @@ function maxDayBy(days, key) {
   return days.reduce((best, day) => {
     const value = Number(day?.[key] || 0);
     const bestValue = Number(best?.[key] || 0);
-    return !best || value > bestValue ? day : best;
+    if (!best || value > bestValue) return day;
+    if (value === bestValue && String(day?.date || "") > String(best?.date || "")) return day;
+    return best;
   }, null);
 }
 
@@ -548,29 +555,9 @@ function updateSummary() {
   );
 }
 
-function updateModelLegend(modelRows) {
-  setHtml(
-    els.modelLegend,
-    modelRows
-      .slice(0, 8)
-      .map((model) => {
-        const provider = providerLabel(model);
-        return `
-          <span class="legend-item" title="${escapeHtml(modelTitle(model))}">
-            <i style="background:${colorForModel(model.name)}"></i>
-            <span class="model-label">${escapeHtml(model.name)}</span>
-            ${provider ? `<small>${escapeHtml(provider)}</small>` : ""}
-          </span>
-        `;
-      })
-      .join(""),
-  );
-}
-
 function updateModelMix(days) {
   const modelRows = sumModels(days);
   const total = sumDays(days).totalTokens;
-  updateModelLegend(modelRows);
 
   setHtml(
     els.modelMix,
@@ -674,29 +661,54 @@ function chartY(value, maxValue, pad, plotH) {
   return pad.top + plotH - (Number(value || 0) / maxValue) * plotH;
 }
 
+function drawStar(ctx, cx, cy, outerRadius = 6, innerRadius = 2.8) {
+  ctx.beginPath();
+  for (let point = 0; point < 10; point += 1) {
+    const angle = -Math.PI / 2 + point * (Math.PI / 5);
+    const radius = point % 2 === 0 ? outerRadius : innerRadius;
+    const x = cx + Math.cos(angle) * radius;
+    const y = cy + Math.sin(angle) * radius;
+    if (point === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
 function drawPillLabel(ctx, text, x, y, options = {}) {
   const {
     align = "left",
     color = "#d7ff45",
     background = "rgba(8, 10, 10, 0.82)",
+    bounds = null,
+    star = false,
   } = options;
   ctx.save();
   ctx.font = "800 11px SFMono-Regular, Consolas, monospace";
   const paddingX = 8;
   const paddingY = 5;
+  const starSpace = star ? 18 : 0;
   const metrics = ctx.measureText(text);
-  const width = metrics.width + paddingX * 2;
+  const width = metrics.width + paddingX * 2 + starSpace;
   const height = 22;
-  const left = align === "right" ? x - width : x;
+  let left = align === "right" ? x - width : x;
+  if (bounds) {
+    left = Math.min(Math.max(left, bounds.left), bounds.right - width);
+    y = Math.min(Math.max(y, bounds.top + height / 2), bounds.bottom - height / 2);
+  }
   roundedRect(ctx, left, y - height / 2, width, height, 5);
   ctx.fillStyle = background;
   ctx.fill();
   ctx.strokeStyle = rgba(color, 0.5);
   ctx.stroke();
+  if (star) {
+    drawStar(ctx, left + paddingX + 6, y, 5.5, 2.6);
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
   ctx.fillStyle = color;
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  ctx.fillText(text, left + paddingX, y);
+  ctx.fillText(text, left + paddingX + starSpace, y);
   ctx.restore();
 }
 
@@ -872,24 +884,35 @@ function drawChart() {
     ctx.stroke();
   });
 
-  const peakIndex = days.findIndex((day) => day.date === moments.peakDay?.date);
-  if (!compact && peakIndex >= 0) {
+  const recordBounds = {
+    left: pad.left + 8,
+    right: width - pad.right - 8,
+    top: pad.top + 8,
+    bottom: pad.top + plotH - 8,
+  };
+  const rangePeakDay = maxDayBy(days, "totalTokens");
+  const rangeLongestDay = maxDayBy(days, "sessionDurationSeconds");
+  const peakIndex = days.findIndex((day) => day.date === rangePeakDay?.date);
+  if (!compact && peakIndex >= 0 && rangePeakDay) {
     const day = days[peakIndex];
-    const x = pad.left + peakIndex * step + step / 2;
-    drawPillLabel(ctx, "1B TOKEN DAY", x - 10, chartY(day.totalTokens, tokenMax, pad, plotH) - 18, {
+    drawPillLabel(ctx, `Most tokens: ${compactNumber(day.totalTokens)}`, recordBounds.right, recordBounds.top + 18, {
       align: "right",
       color: "#d7ff45",
       background: "rgba(8, 10, 10, 0.88)",
+      bounds: recordBounds,
+      star: true,
     });
   }
 
-  const longestIndex = days.findIndex((day) => day.date === moments.longestDay?.date);
-  if (!compact && longestIndex >= 0) {
+  const longestIndex = days.findIndex((day) => day.date === rangeLongestDay?.date);
+  if (!compact && longestIndex >= 0 && rangeLongestDay) {
     const day = days[longestIndex];
-    const x = pad.left + longestIndex * step + step / 2;
-    drawPillLabel(ctx, "24H SESSION", x + 12, chartY(day.sessionDurationSeconds, durationMax, pad, plotH) + 18, {
+    drawPillLabel(ctx, `Longest session: ${durationHoursLabel(day.sessionDurationSeconds)}`, recordBounds.right, recordBounds.top + 46, {
+      align: "right",
       color: "#ffbf47",
       background: "rgba(8, 10, 10, 0.88)",
+      bounds: recordBounds,
+      star: true,
     });
   }
 
@@ -919,7 +942,8 @@ function drawChart() {
     ctx.fillText(formatDate(days[index].date), x, height - 28);
   }
 
-  setText(els.rangeCaption, `${fullNumber(days.length)} days | stacked tokens by model | session length`);
+  setText(els.rangeCaption, `${fullNumber(days.length)} days | Session length: first token to last token each day`);
+  els.rangeCaption.title = "Session length is the time between the first counted token event and the last counted token event in each local day.";
   updateTooltip(days);
 }
 

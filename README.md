@@ -14,7 +14,7 @@ It is a local usage estimate, not OpenAI, Anthropic, or Render billing truth.
 
 - Total tokens across logged days.
 - Stacked daily token bars by model.
-- Session length overlay by day.
+- Session length overlay by day, measured from first token to last token.
 - Tokens and call counts by model.
 - Provider labels for Codex and Claude Code.
 - Hover details for the day you are inspecting.
@@ -83,20 +83,20 @@ Avoid changing `tools/refresh_token_data.py` unless you are adding a real provid
 
 ## Install The Shortcut
 
-Install or update the local `dashboard` command from this checkout:
+Install or update the local `maxxreport` command from this checkout:
 
 ```bash
 tools/install_dashboard_shortcut.sh
 ```
 
-The installer creates `~/.local/bin/dashboard`, pointing at this checkout's `tools/update_dashboard.sh`.
+The installer creates `~/.local/bin/maxxreport`, pointing at this checkout's `tools/update_dashboard.sh`.
 
 Make sure `~/.local/bin` is on your `PATH`, then refresh and publish from anywhere:
 
 ```bash
-dashboard
-dashboard --no-push
-dashboard --no-commit
+maxxreport
+maxxreport --no-push
+maxxreport --no-commit
 ```
 
 Re-run `tools/install_dashboard_shortcut.sh` after moving the checkout.
@@ -135,7 +135,7 @@ The importer/update tooling can be configured with environment variables:
 Example:
 
 ```bash
-DASHBOARD_TIMEZONE=America/Los_Angeles dashboard --no-push
+DASHBOARD_TIMEZONE=America/Los_Angeles maxxreport --no-push
 ```
 
 ## Render Hosting
