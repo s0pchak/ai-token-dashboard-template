@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -36,6 +37,59 @@ PROVIDER_NAMES = {
     "claude": "Claude Code",
     "mixed": "Mixed",
 }
+
+MAX_DEFENSIBLE_TASK_TURN_SECONDS = 12 * 60 * 60
+TOOL_CALL_RESPONSE_TYPES = {
+    "function_call",
+    "custom_tool_call",
+    "web_search_call",
+    "tool_search_call",
+}
+
+GENERIC_MODEL_RATE = {
+    "freshInputTokens": 1.75,
+    "cachedInputTokens": 0.175,
+    "outputTokens": 14.0,
+}
+
+MODEL_PRICE_MAP = (
+    (re.compile(r"gpt-5\.5", re.I), {
+        "freshInputTokens": 5.0,
+        "cachedInputTokens": 0.50,
+        "outputTokens": 30.0,
+    }),
+    (re.compile(r"gpt-5\.4-mini", re.I), {
+        "freshInputTokens": 0.75,
+        "cachedInputTokens": 0.075,
+        "outputTokens": 4.5,
+    }),
+    (re.compile(r"gpt-5\.4", re.I), {
+        "freshInputTokens": 2.5,
+        "cachedInputTokens": 0.25,
+        "outputTokens": 15.0,
+    }),
+    (re.compile(r"gpt-5\.[0-9]+-codex-mini|gpt-5.*mini|codex-mini", re.I), {
+        "freshInputTokens": 1.5,
+        "cachedInputTokens": 0.375,
+        "outputTokens": 6.0,
+    }),
+    (re.compile(r"gpt-5\.[0-9]+-codex|gpt-5-codex|gpt-5\.[0-9]+|gpt-5\b", re.I), GENERIC_MODEL_RATE),
+    (re.compile(r"claude.*haiku", re.I), {
+        "freshInputTokens": 1.0,
+        "cachedInputTokens": 0.10,
+        "outputTokens": 5.0,
+    }),
+    (re.compile(r"claude.*sonnet", re.I), {
+        "freshInputTokens": 3.0,
+        "cachedInputTokens": 0.30,
+        "outputTokens": 15.0,
+    }),
+    (re.compile(r"claude.*opus", re.I), {
+        "freshInputTokens": 5.0,
+        "cachedInputTokens": 0.50,
+        "outputTokens": 25.0,
+    }),
+)
 
 
 @dataclass(frozen=True)
@@ -128,6 +182,10 @@ def get_claude_projects_source() -> SourceDir:
     if override:
         return SourceDir(Path(override).expanduser(), "DASHBOARD_CLAUDE_PROJECTS_DIR")
     return SourceDir(CLAUDE_PROJECTS_ROOT, "~/.claude/projects")
+
+
+def get_codex_logs_db_path() -> Path:
+    return Path(os.environ.get("DASHBOARD_CODEX_LOGS_DB") or (CODEX_ROOT / "logs_2.sqlite")).expanduser()
 
 
 def parse_timestamp(value: str | None) -> datetime | None:
@@ -239,6 +297,38 @@ def provider_name(provider_id: str) -> str:
     return PROVIDER_NAMES.get(provider_id, provider_id)
 
 
+def format_duration(seconds: int) -> str:
+    seconds = max(int(seconds), 0)
+    hours, remainder = divmod(seconds, 3600)
+    minutes, remaining_seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {remaining_seconds}s"
+    return f"{remaining_seconds}s"
+
+
+def format_compact_number(value: int | float) -> str:
+    value = float(value or 0)
+    abs_value = abs(value)
+    if abs_value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}".rstrip("0").rstrip(".") + "B"
+    if abs_value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
+    if abs_value >= 1_000:
+        return f"{value / 1_000:.1f}".rstrip("0").rstrip(".") + "K"
+    return f"{int(round(value)):,}"
+
+
+def format_compact_money(value: float) -> str:
+    value = float(value or 0)
+    if value >= 1_000_000:
+        return "$" + f"{value / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
+    if value >= 1_000:
+        return "$" + f"{value / 1_000:.1f}".rstrip("0").rstrip(".") + "K"
+    return f"${int(round(value)):,}"
+
+
 def set_model_provider(target: dict, provider_id: str) -> None:
     next_provider = provider_name(provider_id)
     existing = target.get("provider")
@@ -246,6 +336,213 @@ def set_model_provider(target: dict, provider_id: str) -> None:
         target["provider"] = next_provider
     elif existing != next_provider:
         target["provider"] = PROVIDER_NAMES["mixed"]
+
+
+def rate_for_model(model: str) -> tuple[dict[str, float], bool]:
+    for pattern, rate in MODEL_PRICE_MAP:
+        if pattern.search(model):
+            return rate, False
+    return GENERIC_MODEL_RATE, True
+
+
+def build_api_street_value(model_rows: list[dict]) -> dict:
+    total_usd = 0.0
+    estimated = False
+    for model in model_rows:
+        rate, model_estimated = rate_for_model(str(model.get("name") or "unknown"))
+        usd = sum((int(model.get(key) or 0) / 1_000_000) * rate[key] for key in rate)
+        total_usd += usd
+        estimated = estimated or model_estimated
+    return {
+        "usd": round(total_usd, 4),
+        "estimated": estimated,
+    }
+
+
+def peak_concurrent_codex_terminals(db_path: Path, local_tz: ZoneInfo, earliest_date: str | None = None) -> dict | None:
+    if not db_path.exists():
+        return None
+    cutoff_ts = 0
+    if earliest_date:
+        parsed = parse_timestamp(f"{earliest_date}T00:00:00+00:00")
+        cutoff_ts = int(parsed.timestamp()) if parsed else 0
+    conn = None
+    cursor = None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        cursor = conn.execute(
+            """
+            SELECT (ts / 3600) * 3600 AS hour_ts, COUNT(DISTINCT process_uuid) AS process_count
+            FROM logs
+            WHERE ts >= ? AND process_uuid IS NOT NULL AND process_uuid != ''
+            GROUP BY hour_ts
+            ORDER BY process_count DESC, hour_ts DESC
+            LIMIT 1
+            """,
+            (cutoff_ts,),
+        )
+        row = cursor.fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+    if not row:
+        return None
+
+    hour_ts, process_count = row
+    try:
+        hour_label = datetime.fromtimestamp(int(hour_ts), timezone.utc).astimezone(local_tz).isoformat()
+    except (TypeError, ValueError, OSError):
+        return None
+    return {
+        "count": int(process_count),
+        "hour": hour_label,
+        "date": hour_label[:10],
+    }
+
+
+def codex_session_records(source_dirs: list[SourceDir], local_tz: ZoneInfo) -> dict[str, dict | None]:
+    best_task_turn: tuple[int, datetime] | None = None
+    best_tool_pileup: tuple[int, datetime | None] | None = None
+    for session_file in iter_session_files(source_dirs):
+        started_by_turn: dict[str, datetime] = {}
+        tool_calls = 0
+        first_tool_call_at: datetime | None = None
+        try:
+            handle = session_file.open("r", encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with handle:
+            for line in handle:
+                is_task_event = '"task_started"' in line or '"task_complete"' in line
+                is_tool_call = (
+                    '"type":"response_item"' in line
+                    and (
+                        '"type":"function_call"' in line
+                        or '"type":"custom_tool_call"' in line
+                        or '"type":"web_search_call"' in line
+                        or '"type":"tool_search_call"' in line
+                    )
+                )
+                if not is_task_event and not is_tool_call:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                event_ts = parse_timestamp(obj.get("timestamp"))
+                payload = obj.get("payload") or {}
+                if obj.get("type") == "response_item" and payload.get("type") in TOOL_CALL_RESPONSE_TYPES:
+                    tool_calls += 1
+                    if event_ts and first_tool_call_at is None:
+                        first_tool_call_at = event_ts
+                    continue
+                if obj.get("type") == "event_msg":
+                    turn_id = payload.get("turn_id")
+                    if not turn_id or not event_ts:
+                        continue
+                    if payload.get("type") == "task_started":
+                        started_by_turn[str(turn_id)] = event_ts
+                    elif payload.get("type") == "task_complete":
+                        started_at = started_by_turn.pop(str(turn_id), None)
+                        if not started_at:
+                            continue
+                        duration = max(int((event_ts - started_at).total_seconds()), 0)
+                        if duration > MAX_DEFENSIBLE_TASK_TURN_SECONDS:
+                            continue
+                        if not best_task_turn or duration > best_task_turn[0]:
+                            best_task_turn = (duration, started_at)
+        if tool_calls and (not best_tool_pileup or tool_calls > best_tool_pileup[0]):
+            best_tool_pileup = (tool_calls, first_tool_call_at)
+
+    task_turn = None
+    if best_task_turn:
+        local_start = best_task_turn[1].astimezone(local_tz)
+        task_turn = {
+            "durationSeconds": best_task_turn[0],
+            "date": local_start.date().isoformat(),
+        }
+
+    tool_pileup = None
+    if best_tool_pileup:
+        local_tool_start = best_tool_pileup[1].astimezone(local_tz) if best_tool_pileup[1] else None
+        tool_pileup = {
+            "count": best_tool_pileup[0],
+            "date": local_tool_start.date().isoformat() if local_tool_start else None,
+        }
+
+    return {
+        "longestTaskTurn": task_turn,
+        "toolCallPileup": tool_pileup,
+    }
+
+
+def build_highlights(days: list[dict], model_rows: list[dict], codex_sources: list[SourceDir], local_tz: ZoneInfo) -> dict:
+    most_tokens_day = max(days, key=lambda day: int(day.get("totalTokens") or 0), default=None)
+    longest_session_day = max(days, key=lambda day: int(day.get("sessionDurationSeconds") or 0), default=None)
+    street_value = build_api_street_value(model_rows)
+    peak_concurrency = peak_concurrent_codex_terminals(
+        get_codex_logs_db_path(),
+        local_tz,
+        days[0]["date"] if days else None,
+    )
+    session_records = codex_session_records(codex_sources, local_tz)
+    task_turn = session_records["longestTaskTurn"]
+    tool_pileup = session_records["toolCallPileup"]
+    return {
+        "streetValue": {
+            "label": "Street value",
+            "value": format_compact_money(street_value["usd"]),
+            "detail": "API-grade token contraband at public rack rates.",
+            "usd": street_value["usd"],
+            "estimated": bool(street_value["estimated"]),
+            "source": "model_totals",
+        },
+        "peakConcurrentTerminals": {
+            "label": "Terminal swarm",
+            "value": f"{peak_concurrency['count']:,}" if peak_concurrency else "N/A",
+            "detail": "Peak Codex processes in one local hour." if peak_concurrency else "No local Codex log database found.",
+            "date": peak_concurrency["date"] if peak_concurrency else None,
+            "count": peak_concurrency["count"] if peak_concurrency else None,
+            "source": "codex_logs",
+        },
+        "peakDay": {
+            "label": "Most tokens",
+            "value": format_compact_number(int(most_tokens_day["totalTokens"])) if most_tokens_day else "N/A",
+            "detail": f"{most_tokens_day['date']} hit the thickest bag." if most_tokens_day else "No usage days found.",
+            "date": most_tokens_day["date"] if most_tokens_day else None,
+            "tokens": int(most_tokens_day["totalTokens"]) if most_tokens_day else None,
+            "source": "daily_usage",
+        },
+        "longestSession": {
+            "label": "Longest session",
+            "value": format_duration(int(longest_session_day["sessionDurationSeconds"])) if longest_session_day else "N/A",
+            "detail": f"{longest_session_day['date']} kept the lights on." if longest_session_day else "No session span found.",
+            "date": longest_session_day["date"] if longest_session_day else None,
+            "seconds": int(longest_session_day["sessionDurationSeconds"]) if longest_session_day else None,
+            "source": "daily_usage",
+        },
+        "longestTaskTurn": {
+            "label": "Longest task turn",
+            "value": format_duration(task_turn["durationSeconds"]) if task_turn else "N/A",
+            "detail": f"{task_turn['date']} had one agent on the clock." if task_turn else "No paired task turn events found.",
+            "date": task_turn["date"] if task_turn else None,
+            "seconds": task_turn["durationSeconds"] if task_turn else None,
+            "source": "codex_task_events",
+        },
+        "toolCallPileup": {
+            "label": "Tool pileup",
+            "value": format_compact_number(tool_pileup["count"]) if tool_pileup else "N/A",
+            "detail": "Most tool calls packed into one session." if tool_pileup else "No tool calls found.",
+            "date": tool_pileup["date"] if tool_pileup else None,
+            "count": tool_pileup["count"] if tool_pileup else None,
+            "source": "codex_response_items",
+        },
+    }
 
 
 def import_codex_usage(source_dirs: list[SourceDir]) -> tuple[list[UsageEvent], dict]:
@@ -557,6 +854,7 @@ def build_usage() -> dict:
             "claude": claude_stats,
         },
     }
+    stats["highlights"] = build_highlights(days, model_rows, codex_sources, local_tz)
 
     return {
         "schemaVersion": 2,
@@ -574,6 +872,7 @@ def build_usage() -> dict:
             "dedupe": "Codex counts repeated total_token_usage.total_tokens once per session file. Claude keeps one row per transcript path and message.id, choosing the largest token total and latest timestamp on ties.",
             "forkHandling": "Codex forked/subagent sessions skip token_count events in the first two seconds to avoid copied parent history. Claude subagents/sidechains are included.",
             "sessionDuration": "Per local day, first counted token event timestamp through last counted token event timestamp.",
+            "highlights": "Aggregate-only all-time highlights. API street value uses fresh input, cached input, and output token classes; Codex reasoning tokens are not double counted because they are already included in output tokens. Long task-turn highlights ignore paired task events over 12 hours to avoid stale resumed tabs. Tool pileup counts tool-call response items per Codex session transcript.",
             "scope": "Local Codex and Claude Code transcripts only; not account billing truth.",
         },
         "stats": stats,

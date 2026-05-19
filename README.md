@@ -12,6 +12,12 @@ It is not OpenAI billing truth. It is not Anthropic billing truth. It is a mirro
 
 This repo is the forkable starter pack. Bring your own logs, your own Render URL, and a willingness to see the receipt.
 
+## Original Build Receipt
+
+The token dashboard has already burned **212.5M tokens** figuring out how to tell us how many tokens we burned. This is either product development or a very ornate self-report.
+
+Counted on May 19, 2026 at roughly 7:06 PM ET from local Codex transcripts that mention this dashboard (`codex-token-dashboard`, `The Maxx Report`, `the-maxx-report`, or `maxxreport`): **20** transcript files, **1,619** recorded model calls, non-duplicate `last_token_usage.total_tokens` deltas summed. It is an aggregate build receipt, not billing truth, and it does not publish prompts, session IDs, local paths, or tool output.
+
 ## What It Shows
 
 - Total tokens, because one number should be allowed to hurt.

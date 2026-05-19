@@ -1,6 +1,7 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-05-19T18:08:14.875099Z",
+  "generatedAt": "2026-05-19T23:43:01.832029Z",
+  "ownerHandle": "sample-maxxer",
   "timezone": "UTC",
   "sourceDirs": [
     "DASHBOARD_CODEX_DIRS[0]",
@@ -14,6 +15,7 @@
     "dedupe": "Codex counts repeated total_token_usage.total_tokens once per session file. Claude keeps one row per transcript path and message.id, choosing the largest token total and latest timestamp on ties.",
     "forkHandling": "Codex forked/subagent sessions skip token_count events in the first two seconds to avoid copied parent history. Claude subagents/sidechains are included.",
     "sessionDuration": "Per local day, first counted token event timestamp through last counted token event timestamp.",
+    "highlights": "Aggregate-only all-time highlights. API street value uses fresh input, cached input, and output token classes; Codex reasoning tokens are not double counted because they are already included in output tokens. Long task-turn highlights ignore paired task events over 12 hours to avoid stale resumed tabs. Tool pileup counts tool-call response items per Codex session transcript.",
     "scope": "Local Codex and Claude Code transcripts only; not account billing truth."
   },
   "stats": {
@@ -49,6 +51,56 @@
         "missingMessageIdEvents": 0,
         "parseErrors": 0,
         "unknownModelEvents": 0
+      }
+    },
+    "highlights": {
+      "streetValue": {
+        "label": "Street value",
+        "value": "$0",
+        "detail": "API-grade token contraband at public rack rates.",
+        "usd": 0.0004,
+        "estimated": false,
+        "source": "model_totals"
+      },
+      "peakConcurrentTerminals": {
+        "label": "Terminal swarm",
+        "value": "N/A",
+        "detail": "No local Codex log database found.",
+        "date": null,
+        "count": null,
+        "source": "codex_logs"
+      },
+      "peakDay": {
+        "label": "Most tokens",
+        "value": "100",
+        "detail": "2026-01-02 hit the thickest bag.",
+        "date": "2026-01-02",
+        "tokens": 100,
+        "source": "daily_usage"
+      },
+      "longestSession": {
+        "label": "Longest session",
+        "value": "0s",
+        "detail": "2026-01-02 kept the lights on.",
+        "date": "2026-01-02",
+        "seconds": 0,
+        "source": "daily_usage"
+      },
+      "longestTaskTurn": {
+        "label": "Longest task turn",
+        "value": "N/A",
+        "detail": "No paired task turn events found.",
+        "date": null,
+        "seconds": null,
+        "source": "codex_task_events"
+      },
+      "toolCallPileup": {
+        "label": "Tool pileup",
+        "value": "N/A",
+        "detail": "No tool calls found.",
+        "date": null,
+        "count": null,
+        "source": "codex_response_items"
       }
     }
   },

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -63,6 +64,7 @@ class RefreshTokenDataTest(unittest.TestCase):
             {
                 "DASHBOARD_CODEX_DIRS": str(codex_dirs),
                 "DASHBOARD_CLAUDE_PROJECTS_DIR": str(claude_dir),
+                "DASHBOARD_CODEX_LOGS_DB": str(root / "missing-logs.sqlite"),
                 "DASHBOARD_TIMEZONE": "UTC",
             }
         ):
@@ -86,6 +88,8 @@ class RefreshTokenDataTest(unittest.TestCase):
         self.assertEqual(usage["stats"]["countedModelCalls"], 2)
         self.assertEqual(usage["stats"]["duplicateCumulativeEvents"], 1)
         self.assertEqual(usage["stats"]["providers"]["codex"]["countedModelCalls"], 2)
+        self.assertEqual(usage["stats"]["highlights"]["peakConcurrentTerminals"]["value"], "N/A")
+        self.assertEqual(usage["stats"]["highlights"]["longestTaskTurn"]["value"], "N/A")
         self.assertEqual(usage["providers"][0]["id"], "codex")
         self.assertEqual(usage["providers"][0]["totalTokens"], 150)
         self.assertEqual(usage["providers"][1]["id"], "claude")
@@ -152,7 +156,87 @@ class RefreshTokenDataTest(unittest.TestCase):
             {model["name"]: model["provider"] for day in usage["days"] for model in day["models"]},
             {"gpt-5.1-codex-mini": "Codex", "claude-sonnet-4-5": "Claude Code"},
         )
+        highlights = usage["stats"]["highlights"]
+        self.assertEqual(set(highlights.keys()), {
+            "streetValue",
+            "peakConcurrentTerminals",
+            "peakDay",
+            "longestSession",
+            "longestTaskTurn",
+            "toolCallPileup",
+        })
+        for item in highlights.values():
+            self.assertTrue({"label", "value", "detail"}.issubset(item.keys()))
+            self.assertIsInstance(item["label"], str)
+            self.assertIsInstance(item["value"], str)
+            self.assertIsInstance(item["detail"], str)
+        self.assertEqual(highlights["peakDay"]["date"], "2026-01-02")
+        self.assertEqual(highlights["peakDay"]["tokens"], 100)
+        self.assertEqual(highlights["peakDay"]["value"], "100")
+        self.assertEqual(highlights["longestSession"]["date"], "2026-01-02")
+        self.assertEqual(highlights["longestSession"]["seconds"], 0)
+        self.assertEqual(highlights["toolCallPileup"]["value"], "N/A")
+        self.assertTrue(highlights["streetValue"]["value"].startswith("$"))
+        self.assertFalse(highlights["streetValue"]["estimated"])
+        self.assertEqual(highlights["peakConcurrentTerminals"]["value"], "N/A")
+        self.assertEqual(highlights["longestTaskTurn"]["value"], "N/A")
         self.assert_no_absolute_fixture_paths(usage, root)
+
+    def test_codex_highlights_scan_logs_and_task_turns_without_private_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = copy_fixture("codex-only", Path(tmp))
+            session_file = root / "codex/sessions/session.jsonl"
+            session_file.write_text(
+                session_file.read_text(encoding="utf-8")
+                + '\n{"type":"event_msg","timestamp":"2026-01-02T12:10:00Z","payload":{"type":"task_started","turn_id":"turn-private-a"}}\n'
+                + '{"type":"event_msg","timestamp":"2026-01-02T12:14:30Z","payload":{"type":"task_complete","turn_id":"turn-private-a","last_agent_message":"private body omitted from export"}}\n'
+                + '{"type":"response_item","timestamp":"2026-01-02T12:15:00Z","payload":{"type":"function_call","name":"exec_command","call_id":"tool-private-a"}}\n'
+                + '{"type":"response_item","timestamp":"2026-01-02T12:16:00Z","payload":{"type":"web_search_call","id":"tool-private-b"}}\n',
+                encoding="utf-8",
+            )
+            logs_db = root / "logs_2.sqlite"
+            conn = sqlite3.connect(logs_db)
+            try:
+                conn.execute("CREATE TABLE logs (ts INTEGER NOT NULL, process_uuid TEXT, thread_id TEXT, feedback_log_body TEXT)")
+                conn.executemany(
+                    "INSERT INTO logs (ts, process_uuid, thread_id, feedback_log_body) VALUES (?, ?, ?, ?)",
+                    [
+                        (1767355200, "process-private-a", "thread-private-a", "secret"),
+                        (1767355300, "process-private-b", "thread-private-b", "secret"),
+                        (1767358800, "process-private-c", "thread-private-c", "secret"),
+                    ],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            with patched_env(
+                {
+                    "DASHBOARD_CODEX_DIRS": str(root / "codex/sessions"),
+                    "DASHBOARD_CLAUDE_PROJECTS_DIR": str(root / "empty-claude"),
+                    "DASHBOARD_CODEX_LOGS_DB": str(logs_db),
+                    "DASHBOARD_TIMEZONE": "UTC",
+                }
+            ):
+                usage = refresh_token_data.build_usage()
+
+            highlights = usage["stats"]["highlights"]
+            self.assertEqual(highlights["peakConcurrentTerminals"]["value"], "2")
+            self.assertEqual(highlights["peakConcurrentTerminals"]["date"], "2026-01-02")
+            self.assertEqual(highlights["peakConcurrentTerminals"]["count"], 2)
+            self.assertEqual(highlights["longestTaskTurn"]["value"], "4m 30s")
+            self.assertEqual(highlights["longestTaskTurn"]["seconds"], 270)
+            self.assertEqual(highlights["longestTaskTurn"]["date"], "2026-01-02")
+            self.assertEqual(highlights["toolCallPileup"]["value"], "2")
+            self.assertEqual(highlights["toolCallPileup"]["count"], 2)
+            self.assertEqual(highlights["toolCallPileup"]["date"], "2026-01-02")
+            for value in strings_in(highlights):
+                self.assertNotIn("process-private", value)
+                self.assertNotIn("thread-private", value)
+                self.assertNotIn("turn-private", value)
+                self.assertNotIn("tool-private", value)
+                self.assertNotIn("secret", value)
+            self.assert_no_absolute_fixture_paths(usage, root)
 
     def test_owner_handle_helpers(self):
         self.assertEqual(

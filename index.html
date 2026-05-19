@@ -14,6 +14,7 @@
       content="Local telemetry for extremely normal AI usage. Count tokens. Question choices."
     />
     <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://the-maxx-report.onrender.com" />
     <meta name="twitter:card" content="summary" />
     <meta name="twitter:title" content="The Maxx Report" />
     <meta
@@ -21,6 +22,7 @@
       content="Local telemetry for extremely normal AI usage. Count tokens. Question choices."
     />
     <meta name="theme-color" content="#d6ff3f" />
+    <link rel="canonical" href="https://the-maxx-report.onrender.com" />
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="./styles.css" />
   </head>
@@ -74,6 +76,14 @@
                 <button type="button" data-range="30">30d</button>
                 <button type="button" data-range="14">14d</button>
               </div>
+              <button
+                type="button"
+                class="session-toggle active"
+                id="sessionToggle"
+                aria-pressed="true"
+              >
+                Toggle Session Length
+              </button>
             </div>
           </div>
           <div class="chart-wrap">
@@ -86,9 +96,14 @@
           <section class="side-panel">
             <h2>Model Receipts</h2>
             <div class="model-mix" id="modelMix"></div>
+            <p class="session-definition" id="sessionDefinition">
+              Session length: first token to last token in a single day.
+            </p>
           </section>
         </aside>
       </section>
+
+      <section class="highlight-strip" id="highlightGrid" aria-label="Maxx records"></section>
     </main>
 
     <script src="./data/usage.js"></script>

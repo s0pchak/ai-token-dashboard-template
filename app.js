@@ -12,6 +12,7 @@ const usage = window.AI_TOKEN_USAGE || window.CODEX_TOKEN_USAGE || {
 
 const state = {
   range: "all",
+  showSessionLine: true,
   hoveredIndex: null,
   pointerX: 0,
   pointerY: 0,
@@ -52,8 +53,10 @@ const els = {
   tableCaption: document.querySelector("#tableCaption"),
   chart: document.querySelector("#dailyChart"),
   tooltip: document.querySelector("#chartTooltip"),
+  sessionToggle: document.querySelector("#sessionToggle"),
   dailyRows: document.querySelector("#dailyRows"),
   modelMix: document.querySelector("#modelMix"),
+  highlightGrid: document.querySelector("#highlightGrid"),
   captureMeta: document.querySelector("#captureMeta"),
   heroTotal: document.querySelector("#heroTotal"),
   heroCaption: document.querySelector("#heroCaption"),
@@ -177,6 +180,39 @@ function durationHoursLabel(seconds = 0) {
   const hours = Math.round(Number(seconds || 0) / 3600);
   if (hours < 1) return durationLabel(seconds);
   return `${hours} ${hours === 1 ? "hour" : "hours"}`;
+}
+
+function formatMoneyCompact(value = 0) {
+  const amount = Number(value || 0);
+  if (!Number.isFinite(amount) || amount <= 0) return "$0";
+  if (amount >= 1_000_000) return `$${(amount / 1_000_000).toFixed(amount >= 10_000_000 ? 0 : 1)}M`;
+  if (amount >= 1_000) return `$${(amount / 1_000).toFixed(amount >= 10_000 ? 0 : 1)}K`;
+  return `$${Math.round(amount)}`;
+}
+
+function rateForModel(model = {}) {
+  const name = String(model.name || "").toLowerCase();
+  const provider = providerLabel(model).toLowerCase();
+  if (provider.includes("claude") || name.includes("claude")) {
+    if (name.includes("opus")) return { input: 5, cached: 0.5, output: 25 };
+    if (name.includes("haiku")) return { input: 1, cached: 0.1, output: 5 };
+    return { input: 3, cached: 0.3, output: 15 };
+  }
+  if (name.includes("5.5")) return { input: 5, cached: 0.5, output: 30 };
+  if (name.includes("5.4-mini")) return { input: 0.75, cached: 0.075, output: 4.5 };
+  if (name.includes("5.4")) return { input: 2.5, cached: 0.25, output: 15 };
+  if (name.includes("mini")) return { input: 1.5, cached: 0.375, output: 6 };
+  return { input: 1.75, cached: 0.175, output: 14 };
+}
+
+function estimateStreetValue(models = usage.models || []) {
+  return models.reduce((sum, model) => {
+    const rate = rateForModel(model);
+    const fresh = Number(model.freshInputTokens || 0);
+    const cached = Number(model.cachedInputTokens || 0);
+    const output = Number(model.outputTokens || 0);
+    return sum + (fresh * rate.input + cached * rate.cached + output * rate.output) / 1_000_000;
+  }, 0);
 }
 
 function percentLabel(value = 0, total = 0) {
@@ -325,6 +361,82 @@ function buildMoments() {
 }
 
 const moments = buildMoments();
+
+function statHighlight(key) {
+  const highlights = usage.stats?.highlights;
+  if (!highlights) return null;
+  if (Array.isArray(highlights)) {
+    return highlights.find((item) => item.key === key || item.id === key) || null;
+  }
+  return highlights[key] || null;
+}
+
+function mergeHighlight(key, fallback) {
+  const item = statHighlight(key);
+  if (!item) return fallback;
+  return {
+    ...fallback,
+    ...item,
+    label: item.label || fallback.label,
+    value: item.value || fallback.value,
+    detail: item.detail || fallback.detail,
+  };
+}
+
+function buildHighlightItems() {
+  const peak = moments.peakDay;
+  const longest = moments.longestDay;
+  return [
+    mergeHighlight("streetValue", {
+      label: "Street Value",
+      value: formatMoneyCompact(estimateStreetValue()),
+      detail: "API-grade tokens, rack-rate contraband.",
+    }),
+    mergeHighlight("peakConcurrentTerminals", {
+      label: "Terminal Swarm",
+      value: "--",
+      detail: "Peak Codex terminals running in one hour.",
+    }),
+    mergeHighlight("peakDay", {
+      label: "Peak Day",
+      value: peak ? compactNumber(peak.totalTokens) : "--",
+      detail: peak ? `${formatDateLong(peak.date)} burned the most tokens.` : "Most tokens in one day.",
+    }),
+    mergeHighlight("longestSession", {
+      label: "Longest Session",
+      value: longest ? durationHoursLabel(longest.sessionDurationSeconds) : "--",
+      detail: longest ? `${formatDateLong(longest.date)} went end-to-end.` : "First token to last token in a day.",
+    }),
+    mergeHighlight("longestTaskTurn", {
+      label: "Longest Task Turn",
+      value: "--",
+      detail: "Longest single agent run with a start and finish.",
+    }),
+    mergeHighlight("toolCallPileup", {
+      label: "Tool Pileup",
+      value: moments.callsDay ? fullNumber(moments.callsDay.modelCalls) : "--",
+      detail: "Most tool calls packed into one session.",
+    }),
+  ];
+}
+
+function updateHighlights() {
+  if (!els.highlightGrid) return;
+  setHtml(
+    els.highlightGrid,
+    buildHighlightItems()
+      .map(
+        (item) => `
+          <article class="highlight-card">
+            <span>${escapeHtml(item.label)}</span>
+            <strong>${escapeHtml(item.value)}</strong>
+            <p>${escapeHtml(item.detail)}</p>
+          </article>
+        `,
+      )
+      .join(""),
+  );
+}
 
 function shortDateList(days, limit = 3) {
   if (!days.length) return "none";
@@ -589,11 +701,20 @@ function updateSummary() {
 function updateModelMix(days) {
   const modelRows = sumModels(days);
   const total = sumDays(days).totalTokens;
+  const availableHeight = Number(els.modelMix?.clientHeight || 0);
+  const rowBudget = availableHeight ? Math.max(Math.floor(availableHeight / 43), 1) : 8;
+  const visibleCount = Math.min(modelRows.length, rowBudget, 8);
+  const visibleRows = modelRows.slice(0, visibleCount);
+
+  if (els.modelMix) {
+    els.modelMix.classList.toggle("sparse", visibleRows.length > 0 && visibleRows.length <= 3);
+    els.modelMix.classList.toggle("single-model", visibleRows.length === 1);
+    els.modelMix.classList.toggle("fill-space", visibleRows.length > 3);
+  }
 
   setHtml(
     els.modelMix,
-    modelRows
-      .slice(0, 8)
+    visibleRows
       .map((model) => {
         const width = total ? Math.max((model.totalTokens / total) * 100, 1) : 0;
         const provider = providerLabel(model);
@@ -756,8 +877,8 @@ function drawChart() {
 
   const compact = width < 620;
   const pad = compact
-    ? { top: 44, right: 48, bottom: 54, left: 54 }
-    : { top: 54, right: 82, bottom: 62, left: 76 };
+    ? { top: 44, right: state.showSessionLine ? 48 : 26, bottom: 54, left: 54 }
+    : { top: 54, right: state.showSessionLine ? 82 : 34, bottom: 62, left: 76 };
   const plotW = Math.max(width - pad.left - pad.right, 1);
   const plotH = Math.max(height - pad.top - pad.bottom, 1);
   const step = plotW / days.length;
@@ -829,11 +950,13 @@ function drawChart() {
     ctx.restore();
   });
 
-  ctx.textBaseline = "middle";
-  ctx.textAlign = "left";
-  ctx.fillStyle = "#93a29f";
-  ctx.fillText(durationLabel(durationMax), width - pad.right + 12, pad.top);
-  ctx.fillText("0m", width - pad.right + 12, pad.top + plotH);
+  if (state.showSessionLine) {
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#93a29f";
+    ctx.fillText(durationLabel(durationMax), width - pad.right + 12, pad.top);
+    ctx.fillText("0m", width - pad.right + 12, pad.top + plotH);
+  }
 
   days.forEach((day, index) => {
     const x = pad.left + index * step + (step - columnWidth) / 2;
@@ -880,40 +1003,42 @@ function drawChart() {
     day,
   }));
 
-  ctx.save();
-  ctx.strokeStyle = "rgba(255, 191, 71, 0.22)";
-  ctx.lineWidth = compact ? 6 : 8;
-  ctx.shadowColor = "rgba(255, 191, 71, 0.42)";
-  ctx.shadowBlur = 18;
-  ctx.beginPath();
-  sessionPoints.forEach(({ x, y }, index) => {
-    if (index === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
-  ctx.restore();
-
-  ctx.strokeStyle = "#ffd16a";
-  ctx.lineWidth = compact ? 2.4 : 3.2;
-  ctx.lineJoin = "round";
-  ctx.lineCap = "round";
-  ctx.beginPath();
-  sessionPoints.forEach(({ x, y }, index) => {
-    if (index === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
-
-  sessionPoints.forEach(({ x, y, day }) => {
-    if (Number(day.sessionDurationSeconds || 0) < 20 * 60 * 60 && day !== days[hoverIndex]) return;
+  if (state.showSessionLine) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(255, 191, 71, 0.22)";
+    ctx.lineWidth = compact ? 6 : 8;
+    ctx.shadowColor = "rgba(255, 191, 71, 0.42)";
+    ctx.shadowBlur = 18;
     ctx.beginPath();
-    ctx.fillStyle = "#ffd16a";
-    ctx.strokeStyle = "rgba(6, 7, 9, 0.85)";
-    ctx.lineWidth = 2;
-    ctx.arc(x, y, day === days[hoverIndex] ? 6 : 4.5, 0, Math.PI * 2);
-    ctx.fill();
+    sessionPoints.forEach(({ x, y }, index) => {
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
     ctx.stroke();
-  });
+    ctx.restore();
+
+    ctx.strokeStyle = "#ffd16a";
+    ctx.lineWidth = compact ? 2.4 : 3.2;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    sessionPoints.forEach(({ x, y }, index) => {
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    sessionPoints.forEach(({ x, y, day }) => {
+      if (Number(day.sessionDurationSeconds || 0) < 20 * 60 * 60 && day !== days[hoverIndex]) return;
+      ctx.beginPath();
+      ctx.fillStyle = "#ffd16a";
+      ctx.strokeStyle = "rgba(6, 7, 9, 0.85)";
+      ctx.lineWidth = 2;
+      ctx.arc(x, y, day === days[hoverIndex] ? 6 : 4.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    });
+  }
 
   const recordBounds = {
     left: pad.left + 8,
@@ -936,7 +1061,7 @@ function drawChart() {
   }
 
   const longestIndex = days.findIndex((day) => day.date === rangeLongestDay?.date);
-  if (!compact && longestIndex >= 0 && rangeLongestDay) {
+  if (state.showSessionLine && !compact && longestIndex >= 0 && rangeLongestDay) {
     const day = days[longestIndex];
     drawPillLabel(ctx, `Longest session: ${durationHoursLabel(day.sessionDurationSeconds)}`, recordBounds.right, recordBounds.top + 46, {
       align: "right",
@@ -949,17 +1074,19 @@ function drawChart() {
 
   if (hoverIndex !== null && days[hoverIndex]) {
     const x = pad.left + hoverIndex * step + step / 2;
-    const y = chartY(days[hoverIndex].sessionDurationSeconds || 0, durationMax, pad, plotH);
     ctx.strokeStyle = "rgba(215, 255, 69, 0.62)";
     ctx.lineWidth = 1.4;
     ctx.beginPath();
     ctx.moveTo(x, pad.top);
     ctx.lineTo(x, pad.top + plotH);
     ctx.stroke();
-    ctx.fillStyle = "#fff3b0";
-    ctx.beginPath();
-    ctx.arc(x, y, 6, 0, Math.PI * 2);
-    ctx.fill();
+    if (state.showSessionLine) {
+      const y = chartY(days[hoverIndex].sessionDurationSeconds || 0, durationMax, pad, plotH);
+      ctx.fillStyle = "#fff3b0";
+      ctx.beginPath();
+      ctx.arc(x, y, 6, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 
   ctx.fillStyle = "#8fa09c";
@@ -973,8 +1100,8 @@ function drawChart() {
     ctx.fillText(formatDate(days[index].date), x, height - 28);
   }
 
-  setText(els.rangeCaption, `${fullNumber(days.length)} days | Session length: first token to last token each day`);
-  els.rangeCaption.title = "Session length is the time between the first counted token event and the last counted token event in each local day.";
+  setText(els.rangeCaption, `${fullNumber(days.length)} days burning tokens`);
+  els.rangeCaption.title = "";
   updateTooltip(days);
 }
 
@@ -1045,6 +1172,7 @@ function render() {
   updatePersonalityLayer();
   updateSummary();
   updateModelMix(days);
+  updateHighlights();
   updateCapture(days);
   updateTable(days);
   drawChart();
@@ -1058,6 +1186,15 @@ document.querySelectorAll("[data-range]").forEach((button) => {
     render();
   });
 });
+
+if (els.sessionToggle) {
+  els.sessionToggle.addEventListener("click", () => {
+    state.showSessionLine = !state.showSessionLine;
+    els.sessionToggle.classList.toggle("active", state.showSessionLine);
+    els.sessionToggle.setAttribute("aria-pressed", String(state.showSessionLine));
+    drawChart();
+  });
+}
 
 els.chart.addEventListener("mousemove", (event) => {
   const days = getRangeDays();
