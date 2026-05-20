@@ -2530,3 +2530,28 @@ h1 {
     overflow: visible;
   }
 }
+
+/* Click a model in the receipts panel (the legend) to isolate it in the chart. */
+.model-row {
+  cursor: pointer;
+  border-radius: 5px;
+  transition: opacity 140ms ease, background 140ms ease;
+}
+
+.model-row:hover {
+  background: rgba(245, 241, 232, 0.05);
+}
+
+.model-row:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 1px;
+}
+
+.model-mix.has-isolation .model-row:not(.isolated) {
+  opacity: 0.36;
+}
+
+.model-row.isolated {
+  background: rgba(215, 255, 69, 0.08);
+  box-shadow: inset 3px 0 0 var(--acid);
+}

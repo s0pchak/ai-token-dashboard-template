@@ -15,6 +15,7 @@ const state = {
   metric: "output",
   heatmapPeriod: "12mo",
   showSessionLine: true,
+  isolatedModel: null,
   hoveredIndex: null,
   pointerX: 0,
   pointerY: 0,
@@ -904,6 +905,7 @@ function updateModelMix(days) {
     els.modelMix.classList.toggle("sparse", visibleRows.length > 0 && visibleRows.length <= 3);
     els.modelMix.classList.toggle("single-model", visibleRows.length === 1);
     els.modelMix.classList.toggle("fill-space", visibleRows.length > 3);
+    els.modelMix.classList.toggle("has-isolation", Boolean(state.isolatedModel));
   }
 
   setHtml(
@@ -913,8 +915,10 @@ function updateModelMix(days) {
         const value = metricValue(model);
         const width = total ? Math.max((value / total) * 100, 1) : 0;
         const provider = providerLabel(model);
+        const isIsolated = state.isolatedModel === model.name;
+        const rowClass = `model-row${isIsolated ? " isolated" : ""}`;
         return `
-          <div class="model-row">
+          <div class="${rowClass}" data-model="${escapeHtml(model.name)}" role="button" tabindex="0" aria-pressed="${isIsolated}" title="Click to isolate ${escapeHtml(model.name)} in the chart">
             <div>
               <span title="${escapeHtml(modelTitle(model))}">
                 <i style="background:${colorForModel(model.name)}"></i>
@@ -1078,11 +1082,17 @@ function drawChart() {
   const plotH = Math.max(height - pad.top - pad.bottom, 1);
   const step = plotW / days.length;
   const columnWidth = Math.max(Math.min(step * 0.62, compact ? 14 : 22), days.length > 80 ? 2 : 5);
-  const maxTokens = Math.max(...days.map((day) => metricValue(day)), 1);
+  const isolated = state.isolatedModel;
+  const dayChartValue = (day) => {
+    if (!isolated) return metricValue(day);
+    const entry = (day.models || []).find((model) => model.name === isolated);
+    return entry ? metricValue(entry) : 0;
+  };
+  const maxTokens = Math.max(...days.map(dayChartValue), 1);
   const tokenMax = Math.max(maxTokens * 1.08, 1);
   const maxDuration = Math.max(...days.map((day) => day.sessionDurationSeconds || 0), 60 * 60);
   const durationMax = Math.max(maxDuration, 24 * 60 * 60);
-  const orderedModels = modelRows.map((model) => model.name);
+  const orderedModels = isolated ? [isolated] : modelRows.map((model) => model.name);
   const hoverIndex = state.hoveredIndex;
 
   state.chartGeometry = { pad, plotW, plotH, step, columnWidth };
@@ -1242,13 +1252,15 @@ function drawChart() {
     top: pad.top + 8,
     bottom: pad.top + plotH - 8,
   };
-  const rangePeakDay = maxDayBy(days, "totalTokens");
+  const rangePeakDay = isolated
+    ? days.reduce((best, day) => (!best || dayChartValue(day) > dayChartValue(best) ? day : best), null)
+    : maxDayBy(days, "totalTokens");
   const rangeLongestDay = maxDayBy(days, "sessionDurationSeconds");
   const peakIndex = days.findIndex((day) => day.date === rangePeakDay?.date);
-  if (!compact && peakIndex >= 0 && rangePeakDay) {
+  if (!compact && peakIndex >= 0 && rangePeakDay && dayChartValue(rangePeakDay) > 0) {
     const day = days[peakIndex];
     const label = state.metric === "cost" ? "Most spend" : `Most ${METRIC_SHORT[state.metric]}`;
-    drawPillLabel(ctx, `${label}: ${formatMetric(metricValue(day))}`, recordBounds.right, recordBounds.top + 18, {
+    drawPillLabel(ctx, `${label}: ${formatMetric(dayChartValue(day))}`, recordBounds.right, recordBounds.top + 18, {
       align: "right",
       color: "#d7ff45",
       background: "rgba(8, 10, 10, 0.88)",
@@ -1297,7 +1309,12 @@ function drawChart() {
     ctx.fillText(formatDate(days[index].date), x, height - 28);
   }
 
-  setText(els.rangeCaption, `${fullNumber(days.length)} days | bars = ${METRIC_LABEL[state.metric]}`);
+  setText(
+    els.rangeCaption,
+    isolated
+      ? `${fullNumber(days.length)} days | isolated: ${isolated} (click it again to clear)`
+      : `${fullNumber(days.length)} days | bars = ${METRIC_LABEL[state.metric]}`,
+  );
   els.rangeCaption.title = "Session length is the time between the first counted token event and the last counted token event in each local day.";
   updateTooltip(days);
 }
@@ -1699,6 +1716,26 @@ if (els.sessionToggle) {
     els.sessionToggle.classList.toggle("active", state.showSessionLine);
     els.sessionToggle.setAttribute("aria-pressed", String(state.showSessionLine));
     drawChart();
+  });
+}
+
+function toggleIsolatedModel(name) {
+  if (!name) return;
+  state.isolatedModel = state.isolatedModel === name ? null : name;
+  render();
+}
+
+if (els.modelMix) {
+  els.modelMix.addEventListener("click", (event) => {
+    const row = event.target.closest(".model-row[data-model]");
+    if (row) toggleIsolatedModel(row.dataset.model);
+  });
+  els.modelMix.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const row = event.target.closest(".model-row[data-model]");
+    if (!row) return;
+    event.preventDefault();
+    toggleIsolatedModel(row.dataset.model);
   });
 }
 
