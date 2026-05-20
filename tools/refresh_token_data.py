@@ -75,10 +75,30 @@ class UsageEvent:
     model: str
     usage: dict[str, int]
     subagent: bool = False
+    project: str = ""
 
 
 def get_local_tz() -> ZoneInfo:
     return ZoneInfo(os.environ.get("DASHBOARD_TIMEZONE") or DEFAULT_TIMEZONE)
+
+
+def omit_project_names() -> bool:
+    return bool(os.environ.get("DASHBOARD_OMIT_PROJECT_NAMES"))
+
+
+def project_name(raw: str | None) -> str:
+    """Best-effort project label from a working directory. Strips Claude Code
+    worktree suffixes (.../<repo>/.claude/worktrees/...) back to the repo, then
+    takes the final path segment. Honors DASHBOARD_OMIT_PROJECT_NAMES."""
+    if not raw or omit_project_names():
+        return ""
+    text = str(raw)
+    marker = "/.claude/"
+    if marker in text:
+        text = text.split(marker, 1)[0]
+    text = text.rstrip("/")
+    name = text.rsplit("/", 1)[-1] if "/" in text else text
+    return name or ""
 
 
 def normalize_owner_handle(value: str | None) -> str | None:
@@ -478,6 +498,7 @@ def import_codex_usage(source_dirs: list[SourceDir]) -> tuple[list[UsageEvent], 
     current_model_by_file: dict[str, str] = {
         path: normalize_model(meta.model) for path, meta in metas.items() if meta.model
     }
+    current_project_by_file: dict[str, str] = {}
     stats = {
         "sessionFiles": len(session_files),
         "matchedRelevantEvents": 0,
@@ -503,6 +524,9 @@ def import_codex_usage(source_dirs: list[SourceDir]) -> tuple[list[UsageEvent], 
             payload = obj.get("payload") or {}
             settings = ((payload.get("collaboration_mode") or {}).get("settings") or {})
             current_model_by_file[str(path)] = normalize_model(payload.get("model") or settings.get("model"))
+            cwd = payload.get("cwd") or settings.get("cwd")
+            if cwd:
+                current_project_by_file[str(path)] = project_name(cwd)
             continue
 
         payload = obj.get("payload") or {}
@@ -556,7 +580,10 @@ def import_codex_usage(source_dirs: list[SourceDir]) -> tuple[list[UsageEvent], 
             "reasoningOutputTokens": reasoning_output_tokens,
             "modelCalls": 1,
         }
-        events.append(UsageEvent("codex", event_ts, model, usage_delta))
+        events.append(UsageEvent(
+            "codex", event_ts, model, usage_delta,
+            project=current_project_by_file.get(str(path), ""),
+        ))
         stats["countedModelCalls"] += 1
 
     return events, stats
@@ -641,7 +668,11 @@ def import_claude_usage(projects_source: SourceDir) -> tuple[list[UsageEvent], d
                 if total_tokens <= 0:
                     stats["zeroTokenEvents"] += 1
                     continue
-                event = UsageEvent("claude", event_ts, model, usage_delta, subagent=is_subagent_file)
+                event = UsageEvent(
+                    "claude", event_ts, model, usage_delta,
+                    subagent=is_subagent_file,
+                    project=project_name(obj.get("cwd")),
+                )
                 dedupe_key = (str(transcript_file), str(message_id))
                 current = selected.get(dedupe_key)
                 stats["candidateUsageEvents"] += 1
@@ -739,7 +770,11 @@ def import_opencode_usage(db_source: SourceDir) -> tuple[list[UsageEvent], dict]
             if total_token_count(usage_delta) <= 0:
                 stats["zeroTokenEvents"] += 1
                 continue
-            events.append(UsageEvent("opencode", event_ts, model, usage_delta))
+            opencode_cwd = ((obj.get("path") or {}).get("cwd")) or ((obj.get("path") or {}).get("root"))
+            events.append(UsageEvent(
+                "opencode", event_ts, model, usage_delta,
+                project=project_name(opencode_cwd),
+            ))
     except sqlite3.DatabaseError:
         stats["dbErrors"] += 1
     finally:
@@ -783,28 +818,48 @@ def get_session_gap_seconds() -> int:
     return int(max(minutes, 1.0) * 60)
 
 
+def _top_key(tally: dict[str, int]) -> str:
+    return max(tally.items(), key=lambda kv: kv[1])[0] if tally else ""
+
+
 def compute_sessions(events: list[UsageEvent], gap_seconds: int) -> list[dict]:
     """Group events into continuous sessions, splitting whenever the silent
     gap between consecutive events exceeds gap_seconds. Sessions span midnight
-    and ignore in-session resets like /clear (no gap = same session)."""
+    and ignore in-session resets like /clear (no gap = same session). Each
+    session also tracks its dominant model and project (by token volume)."""
     if not events:
         return []
     ordered = sorted(events, key=lambda event: event.timestamp)
+
+    def fresh(event: UsageEvent) -> dict:
+        return {
+            "start": event.timestamp,
+            "end": event.timestamp,
+            "tokens": 0,
+            "calls": 0,
+            "models": {},
+            "projects": {},
+        }
+
+    def absorb(session: dict, event: UsageEvent) -> None:
+        value = total_token_count(event.usage)
+        session["end"] = event.timestamp
+        session["tokens"] += value
+        session["calls"] += 1
+        if event.model:
+            session["models"][event.model] = session["models"].get(event.model, 0) + value
+        if event.project:
+            session["projects"][event.project] = session["projects"].get(event.project, 0) + value
+
     sessions: list[dict] = []
-    start = ordered[0].timestamp
-    end = ordered[0].timestamp
-    tokens = total_token_count(ordered[0].usage)
-    calls = 1
+    current = fresh(ordered[0])
+    absorb(current, ordered[0])
     for event in ordered[1:]:
-        if (event.timestamp - end).total_seconds() > gap_seconds:
-            sessions.append({"start": start, "end": end, "tokens": tokens, "calls": calls})
-            start = event.timestamp
-            tokens = 0
-            calls = 0
-        end = event.timestamp
-        tokens += total_token_count(event.usage)
-        calls += 1
-    sessions.append({"start": start, "end": end, "tokens": tokens, "calls": calls})
+        if (event.timestamp - current["end"]).total_seconds() > gap_seconds:
+            sessions.append(current)
+            current = fresh(event)
+        absorb(current, event)
+    sessions.append(current)
     return sessions
 
 
@@ -849,12 +904,18 @@ def summarize_sessions(sessions: list[dict], gap_seconds: int, local_tz: ZoneInf
         "longestStartDate": longest["start"].astimezone(local_tz).date().isoformat() if longest else None,
         "medianSeconds": median_seconds,
         "totalActiveSeconds": sum(durations),
-        # Per-session start date + duration so the dashboard can find the
-        # longest session within whatever date range is selected.
+        # Per-session detail for the history timeline + range-scoped longest
+        # session. Times are local ISO so the client can place blocks on a day.
         "list": [
             {
+                "start": s["start"].astimezone(local_tz).isoformat(),
+                "end": s["end"].astimezone(local_tz).isoformat(),
                 "startDate": s["start"].astimezone(local_tz).date().isoformat(),
                 "durationSeconds": int((s["end"] - s["start"]).total_seconds()),
+                "totalTokens": int(s.get("tokens") or 0),
+                "modelCalls": int(s.get("calls") or 0),
+                "topModel": _top_key(s.get("models") or {}),
+                "topProject": _top_key(s.get("projects") or {}),
             }
             for s in sessions
         ],

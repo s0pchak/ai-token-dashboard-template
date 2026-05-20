@@ -211,6 +211,11 @@ const els = {
   hoursCaption: document.querySelector("#hoursCaption"),
   subagentWrap: document.querySelector("#subagentWrap"),
   subagentCaption: document.querySelector("#subagentCaption"),
+  historyScroll: document.querySelector("#historyScroll"),
+  historyCaption: document.querySelector("#historyCaption"),
+  historyLegend: document.querySelector("#historyLegend"),
+  historyTip: document.querySelector("#historyTip"),
+  historyPanel: document.querySelector(".pattern-history"),
   heroPeakTokens: document.querySelector("#heroPeakTokens"),
   heroPeakDate: document.querySelector("#heroPeakDate"),
   heroLongestDuration: document.querySelector("#heroLongestDuration"),
@@ -247,6 +252,36 @@ function colorForModel(name) {
   }
   const color = modelPalette[hash % modelPalette.length];
   modelColors.set(name, color);
+  return color;
+}
+
+const projectPalette = [
+  "#62d8ff",
+  "#f6bf63",
+  "#ed6a8f",
+  "#a78bfa",
+  "#5ff0b2",
+  "#ff8f5f",
+  "#75a7ff",
+  "#d6f35a",
+  "#58d6c9",
+  "#c991ff",
+];
+const projectColors = new Map();
+let projectColorIndex = 0;
+
+// Sequential assignment (not hashing) so distinct projects get distinct colors.
+// Seed in token order first so the heaviest projects claim the clearest hues.
+function colorForProject(name) {
+  const key = name || "unknown";
+  if (projectColors.has(key)) return projectColors.get(key);
+  if (!name) {
+    projectColors.set(key, "#7f8f8b");
+    return "#7f8f8b";
+  }
+  const color = projectPalette[projectColorIndex % projectPalette.length];
+  projectColorIndex += 1;
+  projectColors.set(key, color);
   return color;
 }
 
@@ -1650,6 +1685,123 @@ function updateSubagentShare(days) {
   );
 }
 
+function secondsIntoDay(iso) {
+  const t = String(iso).slice(11, 19).split(":");
+  return (Number(t[0]) || 0) * 3600 + (Number(t[1]) || 0) * 60 + (Number(t[2]) || 0);
+}
+
+function nextDateKey(dateKey) {
+  const d = new Date(`${dateKey}T12:00:00`);
+  d.setDate(d.getDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+// Split a session into per-local-day segments with start/width as fractions of
+// a 24h day, so each segment can be drawn on its day's track.
+function sessionDaySegments(session) {
+  const startDate = String(session.start).slice(0, 10);
+  const endDate = String(session.end).slice(0, 10);
+  const startSec = secondsIntoDay(session.start);
+  const endSec = secondsIntoDay(session.end);
+  const segments = [];
+  let dateKey = startDate;
+  for (let guard = 0; guard < 400; guard += 1) {
+    const from = dateKey === startDate ? startSec : 0;
+    const to = dateKey === endDate ? endSec : 86400;
+    segments.push({ dateKey, from, to });
+    if (dateKey === endDate) break;
+    dateKey = nextDateKey(dateKey);
+  }
+  return segments;
+}
+
+const DOW_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function updateSessionHistory() {
+  if (!els.historyScroll) return;
+  const sessions = (usage.sessions?.list || []).filter((s) => Number(s.durationSeconds || 0) >= 0 && s.start);
+  if (!sessions.length) {
+    els.historyScroll.innerHTML = "<p class=\"history-empty\">No sessions recorded yet.</p>";
+    setText(els.historyCaption, "No sessions yet.");
+    if (els.historyLegend) els.historyLegend.innerHTML = "";
+    return;
+  }
+
+  // Token totals per project; seed colors in descending order so the heaviest
+  // projects get the most distinct palette slots (and the legend matches).
+  const projectTokens = new Map();
+  sessions.forEach((s) => {
+    const key = s.topProject || "unknown";
+    projectTokens.set(key, (projectTokens.get(key) || 0) + Number(s.totalTokens || 0));
+  });
+  const rankedProjects = [...projectTokens.entries()].sort((a, b) => b[1] - a[1]);
+  rankedProjects.forEach(([name]) => colorForProject(name === "unknown" ? "" : name));
+
+  // Group session segments by local day.
+  const byDay = new Map();
+  sessions.forEach((session, index) => {
+    sessionDaySegments(session).forEach((seg) => {
+      if (!byDay.has(seg.dateKey)) byDay.set(seg.dateKey, []);
+      byDay.get(seg.dateKey).push({ ...seg, session, index });
+    });
+  });
+
+  const dayKeys = [...byDay.keys()].sort().reverse(); // newest first
+  const rows = dayKeys.map((dateKey) => {
+    const date = new Date(`${dateKey}T12:00:00`);
+    const blocks = byDay.get(dateKey)
+      .sort((a, b) => a.from - b.from)
+      .map((seg) => {
+        const left = (seg.from / 86400) * 100;
+        const width = Math.max(((seg.to - seg.from) / 86400) * 100, 0.4);
+        const color = colorForProject(seg.session.topProject);
+        return `<div class="history-block" style="left:${left}%;width:${width}%;background:${color}" data-i="${seg.index}"></div>`;
+      })
+      .join("");
+    return `
+      <div class="history-day">
+        <span class="history-date">${DOW_SHORT[date.getDay()]} ${formatDate(dateKey)}</span>
+        <div class="history-track">${blocks}</div>
+      </div>
+    `;
+  }).join("");
+  els.historyScroll.innerHTML = rows;
+  els.historyScroll._sessions = sessions;
+
+  setText(
+    els.historyCaption,
+    `${fullNumber(sessions.length)} sessions across ${fullNumber(dayKeys.length)} days · 2h+ gap = new session · color = project`,
+  );
+
+  if (els.historyLegend) {
+    els.historyLegend.innerHTML = rankedProjects
+      .slice(0, 7)
+      .map(([name]) => `<span><i style="background:${colorForProject(name === "unknown" ? "" : name)}"></i>${escapeHtml(name)}</span>`)
+      .join("");
+  }
+}
+
+function showHistoryTip(block) {
+  if (!els.historyTip || !els.historyPanel) return;
+  const sessions = els.historyScroll?._sessions || [];
+  const session = sessions[Number(block.dataset.i)];
+  if (!session) return;
+  const date = new Date(`${String(session.start).slice(0, 10)}T12:00:00`);
+  const startClock = String(session.start).slice(11, 16);
+  const endClock = String(session.end).slice(11, 16);
+  els.historyTip.innerHTML = `
+    <span class="tip-dow">${DOW_SHORT[date.getDay()]} · ${session.topProject || "unknown project"}</span>
+    <span class="tip-date">${startClock}–${endClock} · ${durationLabel(session.durationSeconds)}</span>
+    <span class="tip-value">${compactNumber(session.totalTokens)} tokens · ${session.topModel || "—"}</span>
+    <span class="tip-sub">${fullNumber(session.modelCalls)} calls</span>
+  `;
+  const panelRect = els.historyPanel.getBoundingClientRect();
+  const blockRect = block.getBoundingClientRect();
+  els.historyTip.style.left = `${blockRect.left - panelRect.left + blockRect.width / 2}px`;
+  els.historyTip.style.top = `${blockRect.top - panelRect.top}px`;
+  els.historyTip.hidden = false;
+}
+
 function render() {
   const days = getRangeDays();
   state.hoveredIndex = null;
@@ -1663,6 +1815,7 @@ function render() {
   updateHeatmap();
   updateHoursHistogram(days);
   updateSubagentShare(days);
+  updateSessionHistory();
   drawChart();
 }
 
@@ -1723,6 +1876,21 @@ function toggleIsolatedModel(name) {
   if (!name) return;
   state.isolatedModel = state.isolatedModel === name ? null : name;
   render();
+}
+
+if (els.historyScroll) {
+  els.historyScroll.addEventListener("mouseover", (event) => {
+    const block = event.target.closest(".history-block[data-i]");
+    if (block) showHistoryTip(block);
+  });
+  els.historyScroll.addEventListener("mouseout", (event) => {
+    if (!event.relatedTarget || !event.relatedTarget.closest?.(".history-block[data-i]")) {
+      if (els.historyTip) els.historyTip.hidden = true;
+    }
+  });
+  els.historyScroll.addEventListener("scroll", () => {
+    if (els.historyTip) els.historyTip.hidden = true;
+  });
 }
 
 if (els.modelMix) {

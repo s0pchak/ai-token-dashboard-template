@@ -229,6 +229,41 @@ class RefreshTokenDataTest(unittest.TestCase):
         tight = refresh_token_data.compute_sessions(events, gap_seconds=25 * 60)
         self.assertEqual(len(tight), 4)
 
+    def test_project_name_extraction(self):
+        # Repo root, Claude worktree path, Codex/OpenCode plain cwd, parent dir.
+        self.assertEqual(refresh_token_data.project_name("/Users/x/Documents/Github/api"), "api")
+        self.assertEqual(
+            refresh_token_data.project_name("/Users/x/Documents/Github/tina-rs/.claude/worktrees/phase-1"),
+            "tina-rs",
+        )
+        self.assertEqual(refresh_token_data.project_name(""), "")
+        self.assertEqual(refresh_token_data.project_name(None), "")
+
+    def test_sessions_track_dominant_model_and_project(self):
+        base = datetime(2026, 3, 1, 9, 0, 0, tzinfo=timezone.utc)
+        usage = {**refresh_token_data.empty_day(), "totalTokens": 100}
+
+        def event(minute, model, project):
+            return refresh_token_data.UsageEvent(
+                "claude", base + timedelta(minutes=minute), model, usage, project=project
+            )
+
+        # One session: opus appears more than haiku; project "alpha" outweighs "beta".
+        events = [
+            event(0, "claude-opus-4-7", "alpha"),
+            event(10, "claude-opus-4-7", "alpha"),
+            event(20, "claude-haiku-4-5", "beta"),
+        ]
+        sessions = refresh_token_data.compute_sessions(events, gap_seconds=120 * 60)
+        summary = refresh_token_data.summarize_sessions(sessions, 120 * 60, refresh_token_data.get_local_tz())
+        self.assertEqual(len(summary["list"]), 1)
+        row = summary["list"][0]
+        self.assertEqual(row["topModel"], "claude-opus-4-7")
+        self.assertEqual(row["topProject"], "alpha")
+        self.assertEqual(row["modelCalls"], 3)
+        self.assertIn("start", row)
+        self.assertIn("end", row)
+
     def test_codex_highlights_scan_logs_and_task_turns_without_private_ids(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = copy_fixture("codex-only", Path(tmp))
