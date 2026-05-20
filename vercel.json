@@ -1,5 +1,5 @@
 {
-  "buildCommand": "test -f data/usage.json && test -f data/usage.js && echo 'Serving prebuilt static dashboard bundle'",
+  "buildCommand": "test -f data/usage.sample.js && echo 'Serving prebuilt static dashboard bundle (real data/usage.js overrides the sample when committed)'",
   "outputDirectory": ".",
   "cleanUrls": true,
   "headers": [

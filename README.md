@@ -22,15 +22,15 @@ Run the importer, open `index.html`, and look at it locally. If you also want to
 
 ## Privacy, Obviously
 
-This repository serves whatever is committed under `data/`. Public fork with real data equals public confession.
+Your real generated data lives in `data/usage.json` and `data/usage.js`, and **both are gitignored**. They will not get committed by accident — `git add -A` and `git commit -am` skip them. That is the default safety net.
 
-- A private live repo can hold your real generated `data/usage.*` bundle.
-- A public template repo should ship only sample or sanitized data unless you are doing performance art.
-- Static hosting serves the committed `data/usage.json` and `data/usage.js` files.
-- Render, Netlify, Vercel, Cloudflare Pages, GitHub Pages, Fly, and friends do not rummage through your laptop.
-- Running the updater locally is the only step that reads local Codex or Claude Code logs.
+- The committed, demo-safe files are `data/usage.sample.json` and `data/usage.sample.js`. A fresh clone (and every cloud deploy) serves the sample.
+- The page loads the sample first, then your real `data/usage.js` if it exists, which overrides the sample. So locally you see your real numbers; the committed repo only ever holds the sample.
+- To publish your real data on a **private** live repo, the updater force-adds `data/usage.*` when you run it without `--no-commit`. That is the only path that commits real data, and it is opt-in.
+- Render, Netlify, Vercel, Cloudflare Pages, GitHub Pages, Fly, and friends do not rummage through your laptop. They serve whatever is committed.
+- Running the updater locally is the only step that reads local Codex, Claude Code, or OpenCode logs.
 
-If you make your fork public, inspect `data/usage.json` before pushing. The dashboard cannot save you from GitHub.
+Public fork with real data still equals public confession — but now you have to *choose* to publish it. If you ever do, keep that repo private.
 
 ## Quickstart
 
@@ -93,7 +93,7 @@ Good setup targets:
 
 - `tools/update_dashboard.sh` for the update cycle.
 - `tools/install_dashboard_shortcut.sh` for the `maxxreport` command.
-- `data/usage.json` and `data/usage.js` for the generated bundle.
+- `data/usage.json` and `data/usage.js` for your generated bundle (gitignored). `data/usage.sample.*` is the committed demo fallback.
 - `render.yaml`, `netlify.toml`, `vercel.json`, `.github/workflows/pages.yml`, or `fly.toml` + `Dockerfile` for static hosting. Pick one; ignore the rest.
 
 Avoid changing `tools/refresh_token_data.py` unless you are adding a real provider or fixing importer behavior.
@@ -126,7 +126,7 @@ Run from the dashboard checkout when the numbers need fresh shame:
 tools/update_dashboard.sh
 ```
 
-The command regenerates `data/usage.json` and `data/usage.js`, validates the importer syntax, commits only those bundled data files when this directory is a Git worktree, and pushes the current branch to the configured remote. It runs the importer via `uv run` against the pinned Python from `.python-version`; the importer has no third-party dependencies, so `uv` is just managing the interpreter.
+The command regenerates `data/usage.json` and `data/usage.js`, validates the importer syntax, and — when this directory is a Git worktree and you did not pass `--no-commit` — force-adds and commits those two files (they are gitignored, so this opt-in publish is the only way they reach a commit), then pushes the current branch. It runs the importer via `uv run` against the pinned Python from `.python-version`; the importer has no third-party dependencies, so `uv` is just managing the interpreter.
 
 Useful options:
 
@@ -170,9 +170,9 @@ The dashboard writes `ownerHandle` into `data/usage.json` when you run the updat
 
 If you want to deploy the dashboard to a cloud host so you can open it from your phone or share a link, pick one of these.
 
-The Maxx Report is a tiny pile of static files: `index.html`, `app.js`, `styles.css`, and the committed `data/usage.json` + `data/usage.js`. Anywhere that can serve a folder will work. The repo ships configs for the obvious choices so you can pick one and ignore the rest. None of these cloud builds run the local importer or read `~/.codex`, Claude Code project logs, or anything else on your machine — they only serve what you committed.
+The Maxx Report is a tiny pile of static files: `index.html`, `app.js`, `styles.css`, the committed `data/usage.sample.*`, and `data/pricing.js`. Anywhere that can serve a folder will work. The repo ships configs for the obvious choices so you can pick one and ignore the rest. None of these cloud builds run the local importer or read `~/.codex`, Claude Code project logs, or anything else on your machine — they only serve what you committed.
 
-Whichever host you pick, the first step is the same: push a repo that contains committed `data/usage.json` and `data/usage.js`. Keep the repo private if the committed data is private to you.
+By default a deploy shows the **sample** data (your real `data/usage.json` / `data/usage.js` are gitignored). To deploy your *real* numbers, push them to a **private** repo: run `tools/update_dashboard.sh` without `--no-commit` (it force-adds the gitignored data files), or in your private fork drop the `data/usage.*` lines from `.gitignore` and commit them normally.
 
 ### Render (`render.yaml`)
 
@@ -194,7 +194,7 @@ Whichever host you pick, the first step is the same: push a repo that contains c
 No config file needed.
 
 1. In Cloudflare Pages, "Create a project" → connect your repo.
-2. Build command: leave empty (or `test -f data/usage.json && test -f data/usage.js`).
+2. Build command: leave empty (or `test -f data/usage.sample.js`).
 3. Build output directory: `/` (the repo root).
 
 ### GitHub Pages (`.github/workflows/pages.yml`)
@@ -221,7 +221,7 @@ Any static file server works. Drop the repo root onto S3 + CloudFront, Surge, a 
 
 Before publishing a template repo:
 
-- Replace real `data/usage.json` and `data/usage.js` with sample or sanitized data.
+- Real `data/usage.json` / `data/usage.js` are gitignored, so they should not be in the repo at all. Make sure `data/usage.sample.json` and `data/usage.sample.js` hold only sanitized demo data.
 - Remove personal live-site links from documentation.
 - Keep the host configs (`render.yaml`, `netlify.toml`, `vercel.json`, `.github/workflows/pages.yml`, `fly.toml`, `Dockerfile`, `nginx.conf`) fork-neutral so each user connects their own repo.
 - Make the description sound like The Maxx Report, not like a printer driver.
