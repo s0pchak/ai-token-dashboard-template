@@ -6,11 +6,11 @@ Count tokens. Question choices.
 
 Are you even token maxxing, bro?
 
-The Maxx Report is a tiny command center for watching your AI coding assistants inhale context like the meter is broken. It reads local Codex and Claude Code transcript logs, turns the evidence into `data/usage.json` and `data/usage.js`, then ships as dumb static files so the dashboard still works while your laptop is asleep.
+The Maxx Report is a tiny command center for watching your AI coding assistants inhale context like the meter is broken. It reads local Codex, Claude Code, and OpenCode transcript logs on your machine, turns the evidence into `data/usage.json` and `data/usage.js`, then opens as a dumb HTML page in your browser. OpenCode traffic routed through OpenRouter shows up automatically with the OpenRouter model id (e.g. `moonshotai/kimi-k2.6`).
 
 It is not OpenAI billing truth. It is not Anthropic billing truth. It is a mirror held up to your choices.
 
-This repo is the forkable starter pack. Bring your own logs, your own Render URL, and a willingness to see the receipt.
+Run the importer, open `index.html`, and look at it locally. If you also want to deploy it to a cloud host so you can pull it up from your phone, there are configs for that too.
 
 ## What It Shows
 
@@ -27,7 +27,7 @@ This repository serves whatever is committed under `data/`. Public fork with rea
 - A private live repo can hold your real generated `data/usage.*` bundle.
 - A public template repo should ship only sample or sanitized data unless you are doing performance art.
 - Static hosting serves the committed `data/usage.json` and `data/usage.js` files.
-- Render and other static-site builds do not rummage through your laptop.
+- Render, Netlify, Vercel, Cloudflare Pages, GitHub Pages, Fly, and friends do not rummage through your laptop.
 - Running the updater locally is the only step that reads local Codex or Claude Code logs.
 
 If you make your fork public, inspect `data/usage.json` before pushing. The dashboard cannot save you from GitHub.
@@ -42,32 +42,46 @@ If you make your fork public, inspect `data/usage.json` before pushing. The dash
    cd the-maxx-report
    ```
 
-3. Generate your dashboard data. Count tokens. Question choices.
+3. Install [uv](https://docs.astral.sh/uv/) — it's the only Python runner this repo uses.
 
    ```bash
-   tools/update_dashboard.sh
+   curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
-4. Commit and push the generated bundle if the updater did not do it for you.
+   The repo pins Python via `.python-version` and `pyproject.toml`, so `uv` will fetch the right interpreter automatically. The importer itself has no third-party dependencies.
+
+4. Generate your dashboard data. Count tokens. Question choices.
 
    ```bash
-   git add data/usage.json data/usage.js
-   git commit -m "Update token dashboard data"
-   git push
+   tools/update_dashboard.sh --no-commit --no-push
    ```
 
-5. Create a Render static site from your repo. The included `render.yaml` keeps the site static and serves the committed bundle, no daemon, no server, no laptop hostage situation.
+   The updater shells out to `uv run`. Drop `--no-commit --no-push` once you are ready to publish a bundle.
+
+5. View it locally.
+
+   ```bash
+   uv run python -m http.server 8768 --bind 127.0.0.1
+   ```
+
+   Then open `http://127.0.0.1:8768/`. You can also just double-click `index.html`; everything is relative paths.
+
+6. (Optional) Deploy to a cloud host. If you want a URL you can hit from your phone, see [Hosting](#hosting).
 
 ## Have An Agent Finish The Fork
 
-This is the part where you burn a few more tokens so your agent can wire up the fork, run the importer, and get the thing hosted without turning the README into a treasure map.
+This is the part where you burn a few more tokens so your agent can wire up the fork, run the importer, and get the thing rendering in your browser without turning the README into a treasure map.
 
 After cloning your fork, give your coding agent a prompt like:
 
 ```text
 I forked The Maxx Report and want it running with my own local AI usage data.
-Read the README, install the maxxreport shortcut, run the importer locally, and
-help me deploy it as a static site.
+Read the README, install uv if it's not already there, install the maxxreport
+shortcut, run the importer locally, and open the dashboard in my browser.
+
+If I also ask to deploy it, pick one of the included host configs (render.yaml,
+netlify.toml, vercel.json, .github/workflows/pages.yml, or fly.toml + Dockerfile)
+and walk me through it. Otherwise leave hosting alone.
 
 Keep the data importer and update workflow intact. Do not publish private usage
 data to a public repo. If this repo is public, use sample or sanitized data.
@@ -80,7 +94,7 @@ Good setup targets:
 - `tools/update_dashboard.sh` for the update cycle.
 - `tools/install_dashboard_shortcut.sh` for the `maxxreport` command.
 - `data/usage.json` and `data/usage.js` for the generated bundle.
-- `render.yaml` for static hosting.
+- `render.yaml`, `netlify.toml`, `vercel.json`, `.github/workflows/pages.yml`, or `fly.toml` + `Dockerfile` for static hosting. Pick one; ignore the rest.
 
 Avoid changing `tools/refresh_token_data.py` unless you are adding a real provider or fixing importer behavior.
 
@@ -112,7 +126,7 @@ Run from the dashboard checkout when the numbers need fresh shame:
 tools/update_dashboard.sh
 ```
 
-The command regenerates `data/usage.json` and `data/usage.js`, validates the importer syntax, commits only those bundled data files when this directory is a Git worktree, and pushes the current branch to the configured remote.
+The command regenerates `data/usage.json` and `data/usage.js`, validates the importer syntax, commits only those bundled data files when this directory is a Git worktree, and pushes the current branch to the configured remote. It runs the importer via `uv run` against the pinned Python from `.python-version`; the importer has no third-party dependencies, so `uv` is just managing the interpreter.
 
 Useful options:
 
@@ -131,6 +145,7 @@ The importer/update tooling can be configured with environment variables:
 
 - `DASHBOARD_CODEX_DIRS`: comma-separated Codex transcript directories to scan. Defaults should cover the normal local Codex session locations.
 - `DASHBOARD_CLAUDE_PROJECTS_DIR`: Claude Code projects directory to scan. Use this when Claude Code data lives outside the default location.
+- `DASHBOARD_OPENCODE_DB`: path to OpenCode's SQLite database. Defaults to `~/.local/share/opencode/opencode.db`. Read-only — the importer opens it with `mode=ro` so it does not interfere with a running OpenCode session.
 - `DASHBOARD_TIMEZONE`: IANA timezone used for daily grouping, such as `America/New_York`.
 - `DASHBOARD_OWNER_HANDLE`: GitHub handle shown beside the big token total. Defaults to the owner from `origin` when it points at GitHub.
 - `DASHBOARD_REMOTE`: Git remote used by the updater when pushing. Defaults to `origin`.
@@ -149,29 +164,58 @@ The dashboard writes `ownerHandle` into `data/usage.json` when you run the updat
 
 - If your `origin` remote is a GitHub repo, the owner is inferred automatically.
 - If you want a different handle, run `DASHBOARD_OWNER_HANDLE=your-handle maxxreport`.
-- Commit and push the regenerated `data/usage.json` and `data/usage.js`, then your hosted page will show `@your-handle` beside the token total.
+- Reload your local page (or commit and push if you bother to host) and `@your-handle` shows up beside the token total.
 
-## Render Hosting
+## Hosting
 
-`render.yaml` is configured as a Render static site. Its build command checks that `data/usage.json` and `data/usage.js` are present, then Render serves the repository root as static files. The cloud does not calculate your sins. It only displays the ones you committed.
+If you want to deploy the dashboard to a cloud host so you can open it from your phone or share a link, pick one of these.
 
-To deploy:
+The Maxx Report is a tiny pile of static files: `index.html`, `app.js`, `styles.css`, and the committed `data/usage.json` + `data/usage.js`. Anywhere that can serve a folder will work. The repo ships configs for the obvious choices so you can pick one and ignore the rest. None of these cloud builds run the local importer or read `~/.codex`, Claude Code project logs, or anything else on your machine — they only serve what you committed.
 
-1. Push a repo that contains committed `data/usage.json` and `data/usage.js`.
-2. In Render, create a new Blueprint or static site from that repo.
-3. Keep the service private if the committed data is private to you.
+Whichever host you pick, the first step is the same: push a repo that contains committed `data/usage.json` and `data/usage.js`. Keep the repo private if the committed data is private to you.
 
-The cloud build does not run the local importer and does not read `~/.codex`, Claude Code project logs, or any other local machine files.
+### Render (`render.yaml`)
 
-## Local Viewing
+1. In Render, create a new Blueprint (or static site) from your repo.
+2. Render reads `render.yaml`, serves the repo root, and redeploys on push to `main`.
 
-Open `index.html` directly in a browser, or serve the directory with any static file server.
+### Netlify (`netlify.toml`)
+
+1. In Netlify, "Add new site" → "Import an existing project" → pick your repo.
+2. Netlify reads `netlify.toml`. Publish directory is the repo root; the build command just checks the bundle is present.
+
+### Vercel (`vercel.json`)
+
+1. In Vercel, "Add New… → Project" → import your repo.
+2. Framework preset: "Other". Vercel reads `vercel.json` and serves the repo root.
+
+### Cloudflare Pages
+
+No config file needed.
+
+1. In Cloudflare Pages, "Create a project" → connect your repo.
+2. Build command: leave empty (or `test -f data/usage.json && test -f data/usage.js`).
+3. Build output directory: `/` (the repo root).
+
+### GitHub Pages (`.github/workflows/pages.yml`)
+
+1. In your repo, Settings → Pages → Source: "GitHub Actions".
+2. Push to `main`. The included workflow uploads the repo root and publishes it.
+
+### Fly.io (`fly.toml` + `Dockerfile`)
+
+Fly hosts containers, not static folders, so the repo ships a 5 MB `nginx:alpine` image that serves the committed bundle on port 8080.
 
 ```bash
-python3 -m http.server 8768 --bind 127.0.0.1
+fly launch --copy-config --no-deploy   # accept the defaults, pick a unique app name
+fly deploy
 ```
 
-Then open `http://127.0.0.1:8768/`.
+`fly launch` will offer to rename the app if `the-maxx-report` is taken; let it. The included `nginx.conf` sets the same cache and `X-Content-Type-Options` headers as the other host configs.
+
+### Anywhere else
+
+Any static file server works. Drop the repo root onto S3 + CloudFront, Surge, a VPS with nginx, or whatever you already pay for. The only requirement is serving `index.html`, `app.js`, `styles.css`, and the `data/` directory with their relative paths intact.
 
 ## Publishing A Template
 
@@ -179,7 +223,7 @@ Before publishing a template repo:
 
 - Replace real `data/usage.json` and `data/usage.js` with sample or sanitized data.
 - Remove personal live-site links from documentation.
-- Keep `render.yaml` fork-neutral so each user connects their own repo in Render.
+- Keep the host configs (`render.yaml`, `netlify.toml`, `vercel.json`, `.github/workflows/pages.yml`, `fly.toml`, `Dockerfile`, `nginx.conf`) fork-neutral so each user connects their own repo.
 - Make the description sound like The Maxx Report, not like a printer driver.
 
 ## Scope
