@@ -421,9 +421,12 @@ def codex_session_records(source_dirs: list[SourceDir], local_tz: ZoneInfo) -> d
     }
 
 
-def build_highlights(days: list[dict], model_rows: list[dict], codex_sources: list[SourceDir], local_tz: ZoneInfo) -> dict:
+def build_highlights(days: list[dict], model_rows: list[dict], codex_sources: list[SourceDir], local_tz: ZoneInfo, session_summary: dict | None = None) -> dict:
     most_tokens_day = max(days, key=lambda day: int(day.get("totalTokens") or 0), default=None)
-    longest_session_day = max(days, key=lambda day: int(day.get("sessionDurationSeconds") or 0), default=None)
+    session_summary = session_summary or {}
+    longest_seconds = int(session_summary.get("longestSeconds") or 0)
+    longest_date = session_summary.get("longestStartDate")
+    gap_minutes = int(session_summary.get("gapMinutes") or 0)
     peak_concurrency = peak_concurrent_codex_terminals(
         get_codex_logs_db_path(),
         local_tz,
@@ -451,11 +454,11 @@ def build_highlights(days: list[dict], model_rows: list[dict], codex_sources: li
         },
         "longestSession": {
             "label": "Longest session",
-            "value": format_duration(int(longest_session_day["sessionDurationSeconds"])) if longest_session_day else "N/A",
-            "detail": f"{longest_session_day['date']} kept the lights on." if longest_session_day else "No session span found.",
-            "date": longest_session_day["date"] if longest_session_day else None,
-            "seconds": int(longest_session_day["sessionDurationSeconds"]) if longest_session_day else None,
-            "source": "daily_usage",
+            "value": format_duration(longest_seconds) if longest_seconds else "N/A",
+            "detail": f"{longest_date} ran longest without a {gap_minutes}m+ break." if longest_date and longest_seconds else "No continuous session found.",
+            "date": longest_date,
+            "seconds": longest_seconds,
+            "source": "sessions",
         },
         "longestTaskTurn": {
             "label": "Longest task turn",
@@ -784,6 +787,84 @@ def provider_row(
     }
 
 
+def get_session_gap_seconds() -> int:
+    raw = os.environ.get("DASHBOARD_SESSION_GAP_MINUTES")
+    try:
+        minutes = float(raw) if raw else 120.0
+    except (TypeError, ValueError):
+        minutes = 120.0
+    return int(max(minutes, 1.0) * 60)
+
+
+def compute_sessions(events: list[UsageEvent], gap_seconds: int) -> list[dict]:
+    """Group events into continuous sessions, splitting whenever the silent
+    gap between consecutive events exceeds gap_seconds. Sessions span midnight
+    and ignore in-session resets like /clear (no gap = same session)."""
+    if not events:
+        return []
+    ordered = sorted(events, key=lambda event: event.timestamp)
+    sessions: list[dict] = []
+    start = ordered[0].timestamp
+    end = ordered[0].timestamp
+    tokens = total_token_count(ordered[0].usage)
+    calls = 1
+    for event in ordered[1:]:
+        if (event.timestamp - end).total_seconds() > gap_seconds:
+            sessions.append({"start": start, "end": end, "tokens": tokens, "calls": calls})
+            start = event.timestamp
+            tokens = 0
+            calls = 0
+        end = event.timestamp
+        tokens += total_token_count(event.usage)
+        calls += 1
+    sessions.append({"start": start, "end": end, "tokens": tokens, "calls": calls})
+    return sessions
+
+
+def active_seconds_by_day(sessions: list[dict], local_tz: ZoneInfo) -> dict[str, int]:
+    """Split each session's elapsed time across the local days it touches, so a
+    day's 'active time' is real focus time, not first-to-last-of-day."""
+    active: dict[str, float] = {}
+    for session in sessions:
+        cursor = session["start"].astimezone(local_tz)
+        end_local = session["end"].astimezone(local_tz)
+        active.setdefault(cursor.date().isoformat(), 0.0)
+        while cursor < end_local:
+            next_midnight = (cursor + timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            segment_end = min(next_midnight, end_local)
+            day_key = cursor.date().isoformat()
+            active[day_key] = active.get(day_key, 0.0) + (segment_end - cursor).total_seconds()
+            cursor = segment_end
+    return {key: int(value) for key, value in active.items()}
+
+
+def summarize_sessions(sessions: list[dict], gap_seconds: int, local_tz: ZoneInfo) -> dict:
+    durations = sorted(int((s["end"] - s["start"]).total_seconds()) for s in sessions)
+    longest = max(
+        sessions,
+        key=lambda s: (s["end"] - s["start"]).total_seconds(),
+        default=None,
+    )
+    median_seconds = 0
+    if durations:
+        mid = len(durations) // 2
+        median_seconds = (
+            durations[mid]
+            if len(durations) % 2
+            else (durations[mid - 1] + durations[mid]) // 2
+        )
+    return {
+        "count": len(sessions),
+        "gapMinutes": gap_seconds // 60,
+        "longestSeconds": int((longest["end"] - longest["start"]).total_seconds()) if longest else 0,
+        "longestStartDate": longest["start"].astimezone(local_tz).date().isoformat() if longest else None,
+        "medianSeconds": median_seconds,
+        "totalActiveSeconds": sum(durations),
+    }
+
+
 def build_usage() -> dict:
     local_tz = get_local_tz()
     codex_sources = get_codex_source_dirs()
@@ -793,6 +874,11 @@ def build_usage() -> dict:
     claude_events, claude_stats = import_claude_usage(claude_source)
     opencode_events, opencode_stats = import_opencode_usage(opencode_source)
     all_events = [*codex_events, *claude_events, *opencode_events]
+
+    session_gap_seconds = get_session_gap_seconds()
+    sessions = compute_sessions(all_events, session_gap_seconds)
+    active_by_day = active_seconds_by_day(sessions, local_tz)
+    session_summary = summarize_sessions(sessions, session_gap_seconds, local_tz)
 
     by_day: dict[str, dict[str, int]] = {}
     model_totals: dict[str, dict[str, int]] = {}
@@ -834,9 +920,9 @@ def build_usage() -> dict:
 
     days = []
     for date_key, values in sorted(by_day.items()):
-        first_at = parse_timestamp(values["firstTokenAt"])
-        last_at = parse_timestamp(values["lastTokenAt"])
-        duration = int((last_at - first_at).total_seconds()) if first_at and last_at else 0
+        # Active time = sum of gap-based session time that falls on this local
+        # day, not first-token-to-last-token (which inflated quiet days to ~24h).
+        duration = active_by_day.get(date_key, 0)
         model_rows = [
             {"name": model, **usage_values}
             for model, usage_values in sorted(
@@ -915,7 +1001,7 @@ def build_usage() -> dict:
             "opencode": opencode_stats,
         },
     }
-    stats["highlights"] = build_highlights(days, model_rows, codex_sources, local_tz)
+    stats["highlights"] = build_highlights(days, model_rows, codex_sources, local_tz, session_summary)
 
     return {
         "schemaVersion": 2,
@@ -934,12 +1020,13 @@ def build_usage() -> dict:
             "modelField": "Codex nearest prior turn_context.payload.model within each session transcript; Claude message.model; OpenCode message.modelID.",
             "dedupe": "Codex counts repeated total_token_usage.total_tokens once per session file. Claude keeps one row per transcript path and message.id, choosing the largest token total and latest timestamp on ties. OpenCode reads one row per assistant message (the table is keyed by message id).",
             "forkHandling": "Codex forked/subagent sessions skip token_count events in the first two seconds to avoid copied parent history. Claude subagents/sidechains are included. OpenCode includes all assistant messages with non-zero tokens.",
-            "sessionDuration": "Per local day, first counted token event timestamp through last counted token event timestamp.",
+            "sessionDuration": f"Continuous sessions: events across all providers are sorted by time, and a silent gap longer than DASHBOARD_SESSION_GAP_MINUTES ({session_summary['gapMinutes']}m default 120m) starts a new session. Per-day session length is the session time that falls on that local day (cross-midnight sessions are split). In-session resets like /clear do not split a session.",
             "highlights": "Aggregate-only all-time highlights. Long task-turn highlights ignore paired task events over 12 hours to avoid stale resumed tabs. Tool pileup counts tool-call response items per Codex session transcript. API street value is computed client-side from data/pricing.js.",
             "scope": "Local Codex, Claude Code, and OpenCode transcripts only; not account billing truth.",
         },
         "stats": stats,
         "totals": totals,
+        "sessions": session_summary,
         "subagentTotals": subagent_totals,
         "hoursOfDay": [
             {"hour": hour, **bucket} for hour, bucket in enumerate(hours_of_day)

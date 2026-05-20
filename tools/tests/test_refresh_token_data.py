@@ -9,6 +9,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 from contextlib import redirect_stdout
 from io import StringIO
@@ -197,7 +198,31 @@ class RefreshTokenDataTest(unittest.TestCase):
         self.assertEqual(highlights["toolCallPileup"]["value"], "N/A")
         self.assertEqual(highlights["peakConcurrentTerminals"]["value"], "N/A")
         self.assertEqual(highlights["longestTaskTurn"]["value"], "N/A")
+        # Gap-based session summary is present and sane.
+        self.assertEqual(usage["sessions"]["gapMinutes"], 120)
+        self.assertGreaterEqual(usage["sessions"]["count"], 1)
+        self.assertIn("longestSeconds", usage["sessions"])
         self.assert_no_absolute_fixture_paths(usage, root)
+
+    def test_compute_sessions_splits_on_idle_gap(self):
+        base = datetime(2026, 3, 1, 8, 0, 0, tzinfo=timezone.utc)
+        usage_one = {**refresh_token_data.empty_day(), "totalTokens": 10}
+
+        def event(minutes_after):
+            return refresh_token_data.UsageEvent(
+                "claude", base + timedelta(minutes=minutes_after), "claude-opus-4-7", usage_one
+            )
+
+        # 0, 30, 60 min → one session (gaps < 120m).
+        # Then 300 min (4h gap) → new session. Then 320 min (20m later) → same.
+        events = [event(0), event(30), event(60), event(300), event(320)]
+        sessions = refresh_token_data.compute_sessions(events, gap_seconds=120 * 60)
+        self.assertEqual(len(sessions), 2)
+        self.assertEqual(int((sessions[0]["end"] - sessions[0]["start"]).total_seconds()), 60 * 60)
+        self.assertEqual(int((sessions[1]["end"] - sessions[1]["start"]).total_seconds()), 20 * 60)
+        # A tighter 25-minute gap threshold splits the first run at the 30→60 boundary too.
+        tight = refresh_token_data.compute_sessions(events, gap_seconds=25 * 60)
+        self.assertEqual(len(tight), 4)
 
     def test_codex_highlights_scan_logs_and_task_turns_without_private_ids(self):
         with tempfile.TemporaryDirectory() as tmp:

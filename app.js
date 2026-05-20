@@ -1243,7 +1243,7 @@ function drawChart() {
   const longestIndex = days.findIndex((day) => day.date === rangeLongestDay?.date);
   if (state.showSessionLine && !compact && longestIndex >= 0 && rangeLongestDay) {
     const day = days[longestIndex];
-    drawPillLabel(ctx, `Longest session: ${durationHoursLabel(day.sessionDurationSeconds)}`, recordBounds.right, recordBounds.top + 46, {
+    drawPillLabel(ctx, `Most active day: ${durationHoursLabel(day.sessionDurationSeconds)}`, recordBounds.right, recordBounds.top + 46, {
       align: "right",
       color: "#ffbf47",
       background: "rgba(8, 10, 10, 0.88)",
