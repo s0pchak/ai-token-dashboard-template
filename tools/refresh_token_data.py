@@ -594,11 +594,14 @@ def build_usage() -> dict:
                 "sessionDurationSeconds": 0,
                 "models": {},
                 "subagentUsage": empty_day(),
+                "hours": {},
             },
         )
         add_usage(day, event.usage)
         if event.subagent:
             add_usage(day["subagentUsage"], event.usage)
+        hour_bucket = day["hours"].setdefault(local_ts.hour, empty_day())
+        add_usage(hour_bucket, event.usage)
         day["firstTokenAt"] = (
             min(day["firstTokenAt"], event.timestamp.isoformat()) if day["firstTokenAt"] else event.timestamp.isoformat()
         )
@@ -626,9 +629,10 @@ def build_usage() -> dict:
                 reverse=True,
             )
         ]
-        clean_values = {key: value for key, value in values.items() if key != "models"}
+        clean_values = {key: value for key, value in values.items() if key not in ("models", "hours")}
         clean_values["sessionDurationSeconds"] = duration
         clean_values["models"] = model_rows
+        clean_values["hours"] = {str(hour): bucket for hour, bucket in sorted(values["hours"].items())}
         days.append({"date": date_key, **clean_values})
 
     subagent_totals = empty_day()

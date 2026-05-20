@@ -98,17 +98,6 @@
       </section>
 
       <section class="patterns" aria-label="Patterns">
-        <div class="pattern-panel pattern-heatmap">
-          <div class="panel-head">
-            <div>
-              <h2>Calendar Heatmap</h2>
-              <p id="heatmapCaption">--</p>
-            </div>
-            <div class="heatmap-legend" id="heatmapLegend"></div>
-          </div>
-          <div class="heatmap-wrap" id="heatmapWrap" aria-label="Daily activity heatmap"></div>
-        </div>
-
         <div class="pattern-panel pattern-hours">
           <div class="panel-head">
             <div>
@@ -129,9 +118,32 @@
           <div class="subagent-wrap" id="subagentWrap" aria-label="Subagent vs main thread share"></div>
         </div>
       </section>
+
+      <section class="heatmap-section" aria-label="Calendar heatmap">
+        <div class="pattern-panel pattern-heatmap">
+          <div class="panel-head">
+            <div>
+              <h2>Calendar Heatmap</h2>
+              <p id="heatmapCaption">--</p>
+            </div>
+            <div class="segmented heatmap-period" id="heatmapPeriod" role="group" aria-label="Heatmap period"></div>
+          </div>
+          <div class="heatmap-scroll">
+            <div class="heatmap-grid">
+              <div class="heatmap-months" id="heatmapMonths"></div>
+              <div class="heatmap-wrap" id="heatmapWrap" aria-label="Daily activity heatmap"></div>
+            </div>
+          </div>
+          <div class="heatmap-legend" id="heatmapLegend"></div>
+          <div class="heatmap-tip" id="heatmapTip" hidden></div>
+        </div>
+      </section>
     </main>
 
-    <script src="./data/usage.js"></script>
+    <!-- Sample data ships in the repo so the template demos and deploys. Your
+         real, gitignored data/usage.js (if present) loads after and overrides it. -->
+    <script src="./data/usage.sample.js"></script>
+    <script src="./data/usage.js" onerror="void 0"></script>
     <script src="./data/pricing.js"></script>
     <script src="./app.js"></script>
   </body>

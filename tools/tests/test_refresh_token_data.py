@@ -151,6 +151,7 @@ class RefreshTokenDataTest(unittest.TestCase):
             self.assertIn("totalTokens", bucket)
         for day in usage["days"]:
             self.assertIn("subagentUsage", day)
+            self.assertIn("hours", day)
         self.assertEqual(usage["schemaVersion"], 2)
         self.assertEqual(usage["firstDate"], "2026-01-02")
         self.assertEqual(usage["lastDate"], "2026-01-03")
@@ -231,6 +232,9 @@ class RefreshTokenDataTest(unittest.TestCase):
         # land in hour buckets 14 and 15.
         self.assertEqual(usage["hoursOfDay"][14]["totalTokens"], 150)
         self.assertEqual(usage["hoursOfDay"][15]["totalTokens"], 280)
+        # Per-day hours mirror the same split, keyed by string hour.
+        self.assertEqual(day["hours"]["14"]["totalTokens"], 150)
+        self.assertEqual(day["hours"]["15"]["totalTokens"], 280)
         self.assert_no_absolute_fixture_paths(usage, root)
 
     def test_opencode_db_aggregates_into_provider_row(self):

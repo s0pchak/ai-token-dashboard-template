@@ -13,6 +13,7 @@ const usage = window.AI_TOKEN_USAGE || window.CODEX_TOKEN_USAGE || {
 const state = {
   range: "all",
   metric: "output",
+  heatmapPeriod: "12mo",
   hoveredIndex: null,
   pointerX: 0,
   pointerY: 0,
@@ -31,6 +32,16 @@ const METRIC_SHORT = {
   new: "new",
   total: "total",
   cost: "cost",
+};
+
+// Short, fixed-width-ish labels for the hero so switching metrics does not
+// reflow the headline. The verbose labels (METRIC_LABEL) still appear in the
+// caption and tooltips.
+const METRIC_UNIT = {
+  output: "output tokens",
+  new: "new tokens",
+  total: "total tokens",
+  cost: "spend (est.)",
 };
 
 const PRICING = window.AI_PRICING || { default: { input: 0, cacheRead: 0, output: 0 }, models: {} };
@@ -186,8 +197,12 @@ const els = {
   heroCaption: document.querySelector("#heroCaption"),
   planPill: document.querySelector("#planPill"),
   heatmapWrap: document.querySelector("#heatmapWrap"),
+  heatmapMonths: document.querySelector("#heatmapMonths"),
   heatmapCaption: document.querySelector("#heatmapCaption"),
   heatmapLegend: document.querySelector("#heatmapLegend"),
+  heatmapPeriod: document.querySelector("#heatmapPeriod"),
+  heatmapTip: document.querySelector("#heatmapTip"),
+  heatmapPanel: document.querySelector(".pattern-heatmap"),
   hoursWrap: document.querySelector("#hoursWrap"),
   hoursCaption: document.querySelector("#hoursCaption"),
   subagentWrap: document.querySelector("#subagentWrap"),
@@ -699,7 +714,7 @@ function updateHeroReceipts() {
   const rangeDays = getRangeDays();
 
   setText(els.heroTotal, formatMetric(moments.totalTokens));
-  setText(els.heroTotalUnit, state.metric === "cost" ? "in model spend (approx.)" : METRIC_LABEL[state.metric]);
+  setText(els.heroTotalUnit, METRIC_UNIT[state.metric]);
 
   if (els.planPill) {
     const perMonth = Number(PLAN.usdPerMonth || 0);
@@ -1248,43 +1263,119 @@ function heatColor(intensity) {
   return "rgb(255, 191, 71)";
 }
 
-function updateHeatmap(days) {
-  if (!els.heatmapWrap) return;
-  if (!days.length) {
-    els.heatmapWrap.innerHTML = "";
-    setText(els.heatmapCaption, "No days yet.");
-    return;
+const DOW_LONG = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function isoLocal(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function heatmapYears() {
+  const years = new Set((usage.days || []).map((day) => String(day.date).slice(0, 4)));
+  return [...years].filter(Boolean).sort().reverse();
+}
+
+function heatmapWindow() {
+  const today = new Date();
+  today.setHours(12, 0, 0, 0);
+  if (state.heatmapPeriod === "12mo") {
+    const start = new Date(today);
+    start.setFullYear(start.getFullYear() - 1);
+    start.setDate(start.getDate() + 1);
+    return { start, end: today };
   }
-  const byDate = new Map(days.map((day) => [day.date, day]));
-  const first = new Date(`${days[0].date}T12:00:00`);
-  const last = new Date(`${days[days.length - 1].date}T12:00:00`);
+  const year = Number(state.heatmapPeriod);
+  const start = new Date(year, 0, 1, 12, 0, 0, 0);
+  let end = new Date(year, 11, 31, 12, 0, 0, 0);
+  if (end > today) end = today; // current year cuts short at today
+  return { start, end };
+}
+
+function renderHeatmapControls() {
+  if (!els.heatmapPeriod) return;
+  const options = [{ key: "12mo", label: "12 mo" }, ...heatmapYears().map((y) => ({ key: y, label: y }))];
+  if (!options.some((opt) => opt.key === state.heatmapPeriod)) {
+    state.heatmapPeriod = options[0].key;
+  }
+  els.heatmapPeriod.innerHTML = options
+    .map(
+      (opt) =>
+        `<button type="button" class="${opt.key === state.heatmapPeriod ? "active" : ""}" data-heatmap-period="${opt.key}">${escapeHtml(opt.label)}</button>`,
+    )
+    .join("");
+}
+
+function updateHeatmap() {
+  if (!els.heatmapWrap) return;
+  const byDate = new Map((usage.days || []).map((day) => [day.date, day]));
+  const { start, end } = heatmapWindow();
   // Align the grid so the first column starts on Sunday.
-  const start = new Date(first);
-  start.setDate(start.getDate() - start.getDay());
-  const maxValue = Math.max(...days.map((day) => metricValue(day)), 1);
+  const gridStart = new Date(start);
+  gridStart.setDate(gridStart.getDate() - gridStart.getDay());
+
+  const windowValues = [];
+  for (const day of usage.days || []) {
+    const date = new Date(`${day.date}T12:00:00`);
+    if (date >= start && date <= end) windowValues.push(metricValue(day));
+  }
+  const maxValue = Math.max(...windowValues, 1);
+  const activeDays = windowValues.filter((value) => value > 0).length;
+
   const cells = [];
-  const cursor = new Date(start);
-  while (cursor <= last) {
-    const iso = cursor.toISOString().slice(0, 10);
+  const monthCols = [];
+  const cursor = new Date(gridStart);
+  let column = 0;
+  let lastMonthLabeled = -1;
+  while (cursor <= end) {
+    if (cursor.getDay() === 0) {
+      // Top of a new week column: label it if it introduces a new month.
+      const month = cursor.getMonth();
+      if (month !== lastMonthLabeled && cursor >= start) {
+        monthCols[column] = MONTH_ABBR[month];
+        lastMonthLabeled = month;
+      }
+      column += 1;
+    }
+    const iso = isoLocal(cursor);
     const day = byDate.get(iso);
     const value = day ? metricValue(day) : 0;
-    const inRange = cursor >= first && cursor <= last;
+    const inRange = cursor >= start && cursor <= end;
     if (!inRange) {
       cells.push(`<div class="heatmap-cell" data-empty="true"></div>`);
-    } else if (!day || value <= 0) {
-      cells.push(`<div class="heatmap-cell" title="${iso}: no activity"></div>`);
+    } else if (value <= 0) {
+      cells.push(`<div class="heatmap-cell" data-date="${iso}" data-value="0"></div>`);
     } else {
       const intensity = Math.min(value / maxValue, 1);
       const color = heatColor(intensity);
-      const label = `${formatDateLong(iso)} · ${formatMetric(value, "full")} ${METRIC_LABEL[state.metric]}`;
-      cells.push(`<div class="heatmap-cell" style="background:${color};border-color:transparent" title="${escapeHtml(label)}"></div>`);
+      cells.push(
+        `<div class="heatmap-cell" data-date="${iso}" data-active="true" style="background:${color};border-color:transparent"></div>`,
+      );
     }
     cursor.setDate(cursor.getDate() + 1);
   }
+
   els.heatmapWrap.innerHTML = cells.join("");
+
+  if (els.heatmapMonths) {
+    const totalCols = column;
+    const monthCells = [];
+    for (let i = 0; i < totalCols; i += 1) {
+      monthCells.push(
+        monthCols[i]
+          ? `<div class="heatmap-month"><span>${monthCols[i]}</span></div>`
+          : `<div class="heatmap-month"></div>`,
+      );
+    }
+    els.heatmapMonths.innerHTML = monthCells.join("");
+  }
+
+  const periodLabel = state.heatmapPeriod === "12mo" ? "trailing 12 months" : state.heatmapPeriod;
   setText(
     els.heatmapCaption,
-    `${fullNumber(days.length)} active days · color scaled by ${METRIC_LABEL[state.metric]}`,
+    `${fullNumber(activeDays)} active days in ${periodLabel} · color = ${METRIC_LABEL[state.metric]}`,
   );
   if (els.heatmapLegend) {
     const ramp = [0.05, 0.25, 0.5, 0.75, 1].map((step) => `<i style="background:${heatColor(step)}"></i>`).join("");
@@ -1292,15 +1383,64 @@ function updateHeatmap(days) {
   }
 }
 
-function updateHoursHistogram() {
+function showHeatmapTip(cell) {
+  if (!els.heatmapTip || !els.heatmapPanel) return;
+  const iso = cell.dataset.date;
+  if (!iso) return;
+  const day = (usage.days || []).find((d) => d.date === iso);
+  const date = new Date(`${iso}T12:00:00`);
+  const value = day ? metricValue(day) : 0;
+  const calls = day ? Number(day.modelCalls || 0) : 0;
+  els.heatmapTip.innerHTML = `
+    <span class="tip-dow">${DOW_LONG[date.getDay()]}</span>
+    <span class="tip-date">${formatDateLong(iso)}</span>
+    <span class="tip-value">${value > 0 ? `${formatMetric(value, "full")} ${METRIC_LABEL[state.metric]}` : "no activity"}</span>
+    ${value > 0 ? `<span class="tip-sub">${fullNumber(calls)} calls</span>` : ""}
+  `;
+  const panelRect = els.heatmapPanel.getBoundingClientRect();
+  const cellRect = cell.getBoundingClientRect();
+  const left = cellRect.left - panelRect.left + cellRect.width / 2;
+  const top = cellRect.top - panelRect.top;
+  els.heatmapTip.style.left = `${left}px`;
+  els.heatmapTip.style.top = `${top}px`;
+  els.heatmapTip.hidden = false;
+  cell.classList.add("is-hovered");
+}
+
+function hideHeatmapTip() {
+  if (els.heatmapTip) els.heatmapTip.hidden = true;
+  els.heatmapWrap?.querySelectorAll(".heatmap-cell.is-hovered").forEach((c) => c.classList.remove("is-hovered"));
+}
+
+function updateHoursHistogram(days) {
   if (!els.hoursWrap) return;
-  const buckets = usage.hoursOfDay || [];
-  if (!buckets.length) {
-    els.hoursWrap.innerHTML = "";
-    setText(els.hoursCaption, "Hour data not in this build.");
-    return;
+  // Sum per-day hour buckets across the visible range so the histogram
+  // follows the chart's range selector. Falls back to the all-time
+  // hoursOfDay aggregate if per-day data isn't present (older bundles).
+  const values = Array(24).fill(0);
+  let havePerDay = false;
+  (days || []).forEach((day) => {
+    const hours = day.hours;
+    if (!hours) return;
+    havePerDay = true;
+    Object.entries(hours).forEach(([hour, usageRow]) => {
+      const idx = Number(hour);
+      if (idx >= 0 && idx < 24) values[idx] += metricValue(usageRow);
+    });
+  });
+  if (!havePerDay) {
+    const fallback = usage.hoursOfDay || [];
+    if (!fallback.length) {
+      els.hoursWrap.innerHTML = "";
+      setText(els.hoursCaption, "Hour data not in this build.");
+      return;
+    }
+    fallback.forEach((bucket) => {
+      const idx = Number(bucket.hour);
+      if (idx >= 0 && idx < 24) values[idx] = metricValue(bucket);
+    });
   }
-  const values = buckets.map((bucket) => metricValue(bucket));
+  const buckets = values;
   const max = Math.max(...values, 1);
   const total = values.reduce((a, b) => a + b, 0);
   const peakHour = values.indexOf(Math.max(...values));
@@ -1377,8 +1517,8 @@ function render() {
   updateModelMix(days);
   updateCapture(days);
   updateTable(days);
-  updateHeatmap(days);
-  updateHoursHistogram();
+  updateHeatmap();
+  updateHoursHistogram(days);
   updateSubagentShare(days);
   drawChart();
 }
@@ -1400,6 +1540,32 @@ document.querySelectorAll("[data-metric]").forEach((button) => {
     render();
   });
 });
+
+if (els.heatmapPeriod) {
+  els.heatmapPeriod.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-heatmap-period]");
+    if (!button) return;
+    state.heatmapPeriod = button.dataset.heatmapPeriod;
+    renderHeatmapControls();
+    hideHeatmapTip();
+    updateHeatmap();
+  });
+}
+
+if (els.heatmapWrap) {
+  els.heatmapWrap.addEventListener("mouseover", (event) => {
+    const cell = event.target.closest(".heatmap-cell[data-date]");
+    if (!cell) return;
+    showHeatmapTip(cell);
+  });
+  els.heatmapWrap.addEventListener("mouseout", (event) => {
+    const cell = event.target.closest(".heatmap-cell[data-date]");
+    if (cell) cell.classList.remove("is-hovered");
+    if (!event.relatedTarget || !event.relatedTarget.closest?.(".heatmap-cell[data-date]")) {
+      hideHeatmapTip();
+    }
+  });
+}
 
 els.chart.addEventListener("mousemove", (event) => {
   const days = getRangeDays();
@@ -1434,4 +1600,5 @@ window.addEventListener("resize", () => {
   drawChart();
 });
 
+renderHeatmapControls();
 render();
