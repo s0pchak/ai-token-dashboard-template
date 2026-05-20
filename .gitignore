@@ -2,3 +2,6 @@
 .playwright-cli/
 __pycache__/
 *.py[cod]
+
+# uv-managed virtualenv (the importer has no deps; this is just the pinned interpreter)
+.venv/
