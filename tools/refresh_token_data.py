@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -19,12 +20,14 @@ DASHBOARD_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = DASHBOARD_ROOT / "data"
 CODEX_ROOT = Path.home() / ".codex"
 CLAUDE_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
+OPENCODE_DB_PATH = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 DEFAULT_TIMEZONE = "America/New_York"
 
 USAGE_KEYS = (
     "totalTokens",
     "inputTokens",
     "cachedInputTokens",
+    "cacheCreationTokens",
     "freshInputTokens",
     "outputTokens",
     "reasoningOutputTokens",
@@ -34,6 +37,7 @@ USAGE_KEYS = (
 PROVIDER_NAMES = {
     "codex": "Codex",
     "claude": "Claude Code",
+    "opencode": "OpenCode",
     "mixed": "Mixed",
 }
 
@@ -128,6 +132,13 @@ def get_claude_projects_source() -> SourceDir:
     if override:
         return SourceDir(Path(override).expanduser(), "DASHBOARD_CLAUDE_PROJECTS_DIR")
     return SourceDir(CLAUDE_PROJECTS_ROOT, "~/.claude/projects")
+
+
+def get_opencode_db_source() -> SourceDir:
+    override = os.environ.get("DASHBOARD_OPENCODE_DB")
+    if override:
+        return SourceDir(Path(override).expanduser(), "DASHBOARD_OPENCODE_DB")
+    return SourceDir(OPENCODE_DB_PATH, "~/.local/share/opencode/opencode.db")
 
 
 def parse_timestamp(value: str | None) -> datetime | None:
@@ -332,6 +343,7 @@ def import_codex_usage(source_dirs: list[SourceDir]) -> tuple[list[UsageEvent], 
             "totalTokens": total_tokens,
             "inputTokens": input_tokens,
             "cachedInputTokens": cached_input_tokens,
+            "cacheCreationTokens": 0,
             "freshInputTokens": max(input_tokens - cached_input_tokens, 0),
             "outputTokens": output_tokens,
             "reasoningOutputTokens": reasoning_output_tokens,
@@ -358,6 +370,7 @@ def claude_usage_from_message_usage(raw_usage: dict) -> dict[str, int]:
         "totalTokens": input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens,
         "inputTokens": input_tokens + cache_creation_input_tokens + cache_read_input_tokens,
         "cachedInputTokens": cache_read_input_tokens,
+        "cacheCreationTokens": cache_creation_input_tokens,
         "freshInputTokens": input_tokens + cache_creation_input_tokens,
         "outputTokens": output_tokens,
         "reasoningOutputTokens": 0,
@@ -437,6 +450,97 @@ def import_claude_usage(projects_source: SourceDir) -> tuple[list[UsageEvent], d
     return events, stats
 
 
+def opencode_usage_from_tokens(raw_tokens: dict) -> dict[str, int]:
+    cache = raw_tokens.get("cache") or {}
+    input_tokens = int(raw_tokens.get("input") or 0)
+    output_tokens = int(raw_tokens.get("output") or 0)
+    reasoning_tokens = int(raw_tokens.get("reasoning") or 0)
+    cache_read = int(cache.get("read") or 0)
+    cache_write = int(cache.get("write") or 0)
+    declared_total = raw_tokens.get("total")
+    total_tokens = (
+        int(declared_total)
+        if declared_total is not None
+        else input_tokens + output_tokens + reasoning_tokens + cache_read + cache_write
+    )
+    return {
+        "totalTokens": total_tokens,
+        "inputTokens": input_tokens + cache_read + cache_write,
+        "cachedInputTokens": cache_read,
+        "cacheCreationTokens": cache_write,
+        "freshInputTokens": input_tokens + cache_write,
+        "outputTokens": output_tokens,
+        "reasoningOutputTokens": reasoning_tokens,
+        "modelCalls": 1,
+    }
+
+
+def import_opencode_usage(db_source: SourceDir) -> tuple[list[UsageEvent], dict]:
+    stats = {
+        "dbPresent": False,
+        "matchedAssistantEvents": 0,
+        "countedModelCalls": 0,
+        "nullUsageEvents": 0,
+        "zeroTokenEvents": 0,
+        "parseErrors": 0,
+        "unknownModelEvents": 0,
+        "dbErrors": 0,
+    }
+    events: list[UsageEvent] = []
+    if not db_source.path.exists():
+        return events, stats
+    stats["dbPresent"] = True
+
+    uri = f"file:{db_source.path}?mode=ro"
+    try:
+        connection = sqlite3.connect(uri, uri=True)
+    except sqlite3.DatabaseError:
+        stats["dbErrors"] += 1
+        return events, stats
+
+    try:
+        cursor = connection.execute(
+            "SELECT data FROM message WHERE json_extract(data,'$.role')='assistant'"
+        )
+        for (raw,) in cursor:
+            stats["matchedAssistantEvents"] += 1
+            try:
+                obj = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                stats["parseErrors"] += 1
+                continue
+            tokens = obj.get("tokens")
+            raw_model = obj.get("modelID") or obj.get("providerID")
+            if not tokens or not raw_model:
+                stats["nullUsageEvents"] += 1
+                continue
+            created_ms = ((obj.get("time") or {}).get("created"))
+            if created_ms is None:
+                stats["parseErrors"] += 1
+                continue
+            try:
+                event_ts = datetime.fromtimestamp(int(created_ms) / 1000, tz=timezone.utc)
+            except (TypeError, ValueError, OSError):
+                stats["parseErrors"] += 1
+                continue
+
+            model = normalize_model(raw_model)
+            if model == "unknown":
+                stats["unknownModelEvents"] += 1
+            usage_delta = opencode_usage_from_tokens(tokens)
+            if total_token_count(usage_delta) <= 0:
+                stats["zeroTokenEvents"] += 1
+                continue
+            events.append(UsageEvent("opencode", event_ts, model, usage_delta))
+    except sqlite3.DatabaseError:
+        stats["dbErrors"] += 1
+    finally:
+        connection.close()
+
+    stats["countedModelCalls"] = len(events)
+    return events, stats
+
+
 def provider_row(
     provider_id: str,
     name: str,
@@ -466,9 +570,11 @@ def build_usage() -> dict:
     local_tz = get_local_tz()
     codex_sources = get_codex_source_dirs()
     claude_source = get_claude_projects_source()
+    opencode_source = get_opencode_db_source()
     codex_events, codex_stats = import_codex_usage(codex_sources)
     claude_events, claude_stats = import_claude_usage(claude_source)
-    all_events = [*codex_events, *claude_events]
+    opencode_events, opencode_stats = import_opencode_usage(opencode_source)
+    all_events = [*codex_events, *claude_events, *opencode_events]
 
     by_day: dict[str, dict[str, int]] = {}
     model_totals: dict[str, dict[str, int]] = {}
@@ -545,16 +651,36 @@ def build_usage() -> dict:
             claude_stats["transcriptFiles"],
             claude_events,
         ),
+        provider_row(
+            "opencode",
+            "OpenCode",
+            [opencode_source.label],
+            1 if opencode_stats["dbPresent"] else 0,
+            opencode_events,
+        ),
     ]
     stats = {
         **codex_stats,
         "countedModelCalls": len(all_events),
-        "nullUsageEvents": codex_stats["nullUsageEvents"] + claude_stats["nullUsageEvents"],
-        "parseErrors": codex_stats["parseErrors"] + claude_stats["parseErrors"],
-        "unknownModelEvents": codex_stats["unknownModelEvents"] + claude_stats["unknownModelEvents"],
+        "nullUsageEvents": (
+            codex_stats["nullUsageEvents"]
+            + claude_stats["nullUsageEvents"]
+            + opencode_stats["nullUsageEvents"]
+        ),
+        "parseErrors": (
+            codex_stats["parseErrors"]
+            + claude_stats["parseErrors"]
+            + opencode_stats["parseErrors"]
+        ),
+        "unknownModelEvents": (
+            codex_stats["unknownModelEvents"]
+            + claude_stats["unknownModelEvents"]
+            + opencode_stats["unknownModelEvents"]
+        ),
         "providers": {
             "codex": codex_stats,
             "claude": claude_stats,
+            "opencode": opencode_stats,
         },
     }
 
@@ -563,18 +689,20 @@ def build_usage() -> dict:
         "generatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "ownerHandle": infer_owner_handle(),
         "timezone": str(local_tz),
-        "sourceDirs": [source.label for source in codex_sources if source.path.exists()] + (
-            [claude_source.label] if claude_source.path.exists() else []
+        "sourceDirs": (
+            [source.label for source in codex_sources if source.path.exists()]
+            + ([claude_source.label] if claude_source.path.exists() else [])
+            + ([opencode_source.label] if opencode_source.path.exists() else [])
         ),
         "firstDate": days[0]["date"] if days else None,
         "lastDate": days[-1]["date"] if days else None,
         "methodology": {
-            "usageField": "Codex last_token_usage.total_tokens; Claude message.usage token fields.",
-            "modelField": "Codex nearest prior turn_context.payload.model within each session transcript; Claude message.model.",
-            "dedupe": "Codex counts repeated total_token_usage.total_tokens once per session file. Claude keeps one row per transcript path and message.id, choosing the largest token total and latest timestamp on ties.",
-            "forkHandling": "Codex forked/subagent sessions skip token_count events in the first two seconds to avoid copied parent history. Claude subagents/sidechains are included.",
+            "usageField": "Codex last_token_usage.total_tokens; Claude message.usage token fields; OpenCode message.tokens (input/output/reasoning/cache.read/cache.write) from opencode.db.",
+            "modelField": "Codex nearest prior turn_context.payload.model within each session transcript; Claude message.model; OpenCode message.modelID.",
+            "dedupe": "Codex counts repeated total_token_usage.total_tokens once per session file. Claude keeps one row per transcript path and message.id, choosing the largest token total and latest timestamp on ties. OpenCode reads one row per assistant message (the table is keyed by message id).",
+            "forkHandling": "Codex forked/subagent sessions skip token_count events in the first two seconds to avoid copied parent history. Claude subagents/sidechains are included. OpenCode includes all assistant messages with non-zero tokens.",
             "sessionDuration": "Per local day, first counted token event timestamp through last counted token event timestamp.",
-            "scope": "Local Codex and Claude Code transcripts only; not account billing truth.",
+            "scope": "Local Codex, Claude Code, and OpenCode transcripts only; not account billing truth.",
         },
         "stats": stats,
         "totals": totals,

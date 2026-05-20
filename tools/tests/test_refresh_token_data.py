@@ -53,16 +53,24 @@ def strings_in(value):
 
 
 class RefreshTokenDataTest(unittest.TestCase):
-    def build_usage(self, fixture_name: str, codex_relative: str, claude_relative: str) -> tuple[dict, Path]:
+    def build_usage(
+        self,
+        fixture_name: str,
+        codex_relative: str,
+        claude_relative: str,
+        opencode_db: Path | None = None,
+    ) -> tuple[dict, Path]:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = copy_fixture(fixture_name, Path(tmp.name))
         codex_dirs = root / codex_relative
         claude_dir = root / claude_relative
+        opencode_path = opencode_db if opencode_db is not None else root / "missing-opencode.db"
         with patched_env(
             {
                 "DASHBOARD_CODEX_DIRS": str(codex_dirs),
                 "DASHBOARD_CLAUDE_PROJECTS_DIR": str(claude_dir),
+                "DASHBOARD_OPENCODE_DB": str(opencode_path),
                 "DASHBOARD_TIMEZONE": "UTC",
             }
         ):
@@ -103,6 +111,7 @@ class RefreshTokenDataTest(unittest.TestCase):
                 "totalTokens": 42,
                 "inputTokens": 34,
                 "cachedInputTokens": 20,
+                "cacheCreationTokens": 5,
                 "freshInputTokens": 14,
                 "outputTokens": 8,
                 "reasoningOutputTokens": 0,
@@ -179,6 +188,7 @@ class RefreshTokenDataTest(unittest.TestCase):
                     {
                         "DASHBOARD_CODEX_DIRS": str(root / "codex/sessions"),
                         "DASHBOARD_CLAUDE_PROJECTS_DIR": str(root / "claude/projects"),
+                        "DASHBOARD_OPENCODE_DB": str(root / "missing-opencode.db"),
                         "DASHBOARD_TIMEZONE": "UTC",
                     }
                 ):
@@ -190,6 +200,90 @@ class RefreshTokenDataTest(unittest.TestCase):
             js_text = (output_dir / "usage.js").read_text(encoding="utf-8")
             self.assertTrue(js_text.startswith("window.AI_TOKEN_USAGE = "))
             self.assertIn("window.CODEX_TOKEN_USAGE = window.AI_TOKEN_USAGE;", js_text)
+
+    def test_opencode_db_aggregates_into_provider_row(self):
+        import sqlite3
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "opencode.db"
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute("CREATE TABLE message (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+            rows = [
+                (
+                    "msg_real",
+                    {
+                        "role": "assistant",
+                        "modelID": "moonshotai/kimi-k2.6",
+                        "providerID": "openrouter",
+                        "time": {"created": 1736208000000},
+                        "tokens": {
+                            "total": 39194,
+                            "input": 18827,
+                            "output": 240,
+                            "reasoning": 671,
+                            "cache": {"write": 0, "read": 19456},
+                        },
+                    },
+                ),
+                (
+                    "msg_zero",
+                    {
+                        "role": "assistant",
+                        "modelID": "moonshotai/kimi-k2.6",
+                        "providerID": "openrouter",
+                        "time": {"created": 1736208001000},
+                        "tokens": {
+                            "total": 0,
+                            "input": 0,
+                            "output": 0,
+                            "reasoning": 0,
+                            "cache": {"write": 0, "read": 0},
+                        },
+                    },
+                ),
+                (
+                    "msg_user",
+                    {
+                        "role": "user",
+                        "time": {"created": 1736208002000},
+                    },
+                ),
+            ]
+            for msg_id, payload in rows:
+                connection.execute(
+                    "INSERT INTO message (id, data) VALUES (?, ?)",
+                    (msg_id, refresh_token_data.json.dumps(payload)),
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
+        usage, root = self.build_usage(
+            "mixed",
+            "codex/sessions",
+            "claude/projects",
+            opencode_db=db_path,
+        )
+
+        opencode_stats = usage["stats"]["providers"]["opencode"]
+        self.assertTrue(opencode_stats["dbPresent"])
+        self.assertEqual(opencode_stats["matchedAssistantEvents"], 2)
+        self.assertEqual(opencode_stats["zeroTokenEvents"], 1)
+        self.assertEqual(opencode_stats["countedModelCalls"], 1)
+
+        providers_by_id = {provider["id"]: provider for provider in usage["providers"]}
+        self.assertIn("opencode", providers_by_id)
+        self.assertEqual(providers_by_id["opencode"]["totalTokens"], 39194)
+        self.assertEqual(providers_by_id["opencode"]["cachedInputTokens"], 19456)
+        self.assertEqual(providers_by_id["opencode"]["cacheCreationTokens"], 0)
+        self.assertEqual(providers_by_id["opencode"]["reasoningOutputTokens"], 671)
+
+        models_by_name = {model["name"]: model for model in usage["models"]}
+        self.assertIn("moonshotai/kimi-k2.6", models_by_name)
+        self.assertEqual(models_by_name["moonshotai/kimi-k2.6"]["provider"], "OpenCode")
+        self.assert_no_absolute_fixture_paths(usage, root)
 
 
 if __name__ == "__main__":
