@@ -11,3 +11,4 @@ __pycache__/
 # files, and the updater force-adds these only when you explicitly publish.
 data/usage.json
 data/usage.js
+.gstack/
