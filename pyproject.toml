@@ -1,0 +1,10 @@
+[project]
+name = "the-maxx-report"
+version = "0.1.0"
+description = "Local telemetry for extremely normal AI usage."
+requires-python = ">=3.10"
+# No runtime dependencies: the importer is pure stdlib by design.
+dependencies = []
+
+[tool.uv]
+package = false

@@ -63,11 +63,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-command -v python3 >/dev/null 2>&1 || die "python3 is required"
+command -v uv >/dev/null 2>&1 || die "uv is required. Install from https://docs.astral.sh/uv/"
 
-echo "Refreshing bundled dashboard data from local Codex and Claude Code logs..."
-python3 -m py_compile tools/refresh_token_data.py
-python3 tools/refresh_token_data.py
+echo "Refreshing bundled dashboard data from local Codex, Claude Code, and OpenCode logs..."
+uv run --quiet python -m py_compile tools/refresh_token_data.py
+uv run --quiet python tools/refresh_token_data.py
 
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "Dashboard data refreshed. This directory is not a Git worktree, so commit/push was skipped."
