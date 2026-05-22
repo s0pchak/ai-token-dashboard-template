@@ -105,6 +105,213 @@ class RefreshTokenDataTest(unittest.TestCase):
         self.assertEqual(usage["providers"][1]["totalTokens"], 0)
         self.assert_no_absolute_fixture_paths(usage, root)
 
+    def test_codex_source_subagent_routes_to_subagent_usage_without_private_exports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codex_dir = root / "codex" / "sessions"
+            claude_dir = root / "empty-claude"
+            codex_dir.mkdir(parents=True)
+            claude_dir.mkdir()
+            session_file = codex_dir / "codex-subagent.jsonl"
+            private_local_path = "/Users/private-codex-subagent/private/worktree"
+            lines = [
+                {
+                    "type": "session_meta",
+                    "timestamp": "2026-01-05T16:00:00Z",
+                    "payload": {
+                        "model": "gpt-5.1-codex-mini",
+                        "forked_from_id": "fork-private-codex-subagent",
+                        "thread_source": "thread-private-codex-subagent",
+                        "agent_nickname": "agent-private-codex-subagent",
+                        "source": {
+                            "subagent": True,
+                            "process_uuid": "process-private-codex-subagent",
+                            "cwd": private_local_path,
+                        },
+                    },
+                },
+                {
+                    "type": "turn_context",
+                    "timestamp": "2026-01-05T16:00:00Z",
+                    "payload": {
+                        "model": "gpt-5.1-codex-mini",
+                        "thread_id": "thread-private-codex-context",
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-01-05T16:00:01Z",
+                    "payload": {
+                        "type": "token_count",
+                        "turn_id": "turn-private-codex-bootstrap",
+                        "last_agent_message": "private bootstrap message body",
+                        "info": {
+                            "total_token_usage": {"total_tokens": 999},
+                            "last_token_usage": {
+                                "total_tokens": 999,
+                                "input_tokens": 700,
+                                "cached_input_tokens": 200,
+                                "output_tokens": 299,
+                                "reasoning_output_tokens": 0,
+                            },
+                        },
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-01-05T16:00:03Z",
+                    "payload": {
+                        "type": "token_count",
+                        "turn_id": "turn-private-codex-counted",
+                        "last_agent_message": "private counted message body",
+                        "info": {
+                            "total_token_usage": {"total_tokens": 1219},
+                            "last_token_usage": {
+                                "total_tokens": 220,
+                                "input_tokens": 150,
+                                "cached_input_tokens": 25,
+                                "output_tokens": 70,
+                                "reasoning_output_tokens": 5,
+                            },
+                        },
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "timestamp": "2026-01-05T16:00:04Z",
+                    "payload": {
+                        "type": "function_call",
+                        "call_id": "tool-private-codex-subagent",
+                        "name": "exec_command",
+                    },
+                },
+            ]
+            session_file.write_text(
+                "\n".join(refresh_token_data.json.dumps(line, separators=(",", ":")) for line in lines) + "\n",
+                encoding="utf-8",
+            )
+
+            meta = refresh_token_data.read_session_meta(session_file)
+            self.assertIsNotNone(meta)
+            self.assertTrue(meta.subagent)
+
+            with patched_env(
+                {
+                    "DASHBOARD_CODEX_DIRS": str(codex_dir),
+                    "DASHBOARD_CLAUDE_PROJECTS_DIR": str(claude_dir),
+                    "DASHBOARD_OPENCODE_DB": str(root / "missing-opencode.db"),
+                    "DASHBOARD_CODEX_LOGS_DB": str(root / "missing-logs.sqlite"),
+                    "DASHBOARD_TIMEZONE": "UTC",
+                }
+            ):
+                usage = refresh_token_data.build_usage()
+
+            self.assertEqual(usage["stats"]["providers"]["codex"]["skippedForkBootstrapEvents"], 1)
+            self.assertEqual(usage["totals"]["totalTokens"], 220)
+            self.assertEqual(usage["subagentTotals"]["totalTokens"], 220)
+            self.assertEqual(usage["subagentTotals"]["outputTokens"], 70)
+            day = usage["days"][0]
+            self.assertEqual(day["subagentUsage"]["totalTokens"], 220)
+            self.assertEqual(day["subagentUsage"]["outputTokens"], 70)
+            for value in strings_in(usage):
+                self.assertNotIn("process-private-codex", value)
+                self.assertNotIn("thread-private-codex", value)
+                self.assertNotIn("turn-private-codex", value)
+                self.assertNotIn("fork-private-codex", value)
+                self.assertNotIn("tool-private-codex", value)
+                self.assertNotIn("/Users/private-codex-subagent", value)
+                self.assertNotIn("private bootstrap message body", value)
+                self.assertNotIn("private counted message body", value)
+            self.assert_no_absolute_fixture_paths(usage, root)
+
+    def test_codex_subagent_without_model_inherits_parent_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codex_dir = root / "codex" / "sessions"
+            claude_dir = root / "empty-claude"
+            codex_dir.mkdir(parents=True)
+            claude_dir.mkdir()
+
+            parent_file = codex_dir / "parent.jsonl"
+            parent_id = "parent-model-thread"
+            parent_lines = [
+                {
+                    "type": "session_meta",
+                    "timestamp": "2026-01-06T16:00:00Z",
+                    "payload": {
+                        "id": parent_id,
+                        "model_provider": "openai",
+                    },
+                },
+                {
+                    "type": "turn_context",
+                    "timestamp": "2026-01-06T16:00:01Z",
+                    "payload": {"model": "gpt-parent-inherited"},
+                },
+            ]
+            parent_file.write_text(
+                "\n".join(refresh_token_data.json.dumps(line, separators=(",", ":")) for line in parent_lines) + "\n",
+                encoding="utf-8",
+            )
+
+            child_file = codex_dir / "child-subagent.jsonl"
+            child_lines = [
+                {
+                    "type": "session_meta",
+                    "timestamp": "2026-01-06T16:05:00Z",
+                    "payload": {
+                        "id": "child-model-thread",
+                        "forked_from_id": parent_id,
+                        "source": {
+                            "subagent": {
+                                "thread_spawn": {
+                                    "parent_thread_id": parent_id,
+                                    "agent_nickname": "child-private-agent",
+                                },
+                            },
+                        },
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-01-06T16:05:03Z",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {"total_tokens": 321},
+                            "last_token_usage": {
+                                "total_tokens": 321,
+                                "input_tokens": 300,
+                                "cached_input_tokens": 120,
+                                "output_tokens": 21,
+                                "reasoning_output_tokens": 7,
+                            },
+                        },
+                    },
+                },
+            ]
+            child_file.write_text(
+                "\n".join(refresh_token_data.json.dumps(line, separators=(",", ":")) for line in child_lines) + "\n",
+                encoding="utf-8",
+            )
+
+            with patched_env(
+                {
+                    "DASHBOARD_CODEX_DIRS": str(codex_dir),
+                    "DASHBOARD_CLAUDE_PROJECTS_DIR": str(claude_dir),
+                    "DASHBOARD_OPENCODE_DB": str(root / "missing-opencode.db"),
+                    "DASHBOARD_CODEX_LOGS_DB": str(root / "missing-logs.sqlite"),
+                    "DASHBOARD_TIMEZONE": "UTC",
+                }
+            ):
+                usage = refresh_token_data.build_usage()
+
+            self.assertEqual(usage["stats"]["providers"]["codex"]["unknownModelEvents"], 0)
+            self.assertEqual(usage["models"][0]["name"], "gpt-parent-inherited")
+            self.assertEqual(usage["models"][0]["totalTokens"], 321)
+            self.assertEqual(usage["subagentTotals"]["totalTokens"], 321)
+            self.assertEqual(usage["days"][0]["models"][0]["name"], "gpt-parent-inherited")
+
     def test_claude_duplicate_stream_dedupes_by_message_id(self):
         usage, root = self.build_usage("claude-duplicate-stream", "empty-codex", "claude/projects")
 
@@ -207,6 +414,9 @@ class RefreshTokenDataTest(unittest.TestCase):
         self.assertEqual(usage["sessions"]["gapMinutes"], 120)
         self.assertGreaterEqual(usage["sessions"]["count"], 1)
         self.assertIn("longestSeconds", usage["sessions"])
+        self.assertIn("Codex source.subagent", usage["methodology"]["forkHandling"])
+        self.assertIn("Claude /subagents/", usage["methodology"]["forkHandling"])
+        self.assertIn("OpenCode", usage["methodology"]["forkHandling"])
         self.assert_no_absolute_fixture_paths(usage, root)
 
     def test_compute_sessions_splits_on_idle_gap(self):
@@ -238,6 +448,11 @@ class RefreshTokenDataTest(unittest.TestCase):
         )
         self.assertEqual(refresh_token_data.project_name(""), "")
         self.assertEqual(refresh_token_data.project_name(None), "")
+        self.assertTrue(
+            refresh_token_data.automated_lane_cwd(
+                "/Users/x/.paperclip/instances/default/projects/agent-id/_default"
+            )
+        )
 
     def test_sessions_split_by_project_and_track_dominant_model(self):
         base = datetime(2026, 3, 1, 9, 0, 0, tzinfo=timezone.utc)
@@ -272,6 +487,61 @@ class RefreshTokenDataTest(unittest.TestCase):
         with_unknown = [event(0, "claude-opus-4-7", "alpha"), event(5, "claude-opus-4-7", "")]
         self.assertEqual(len(refresh_token_data.compute_sessions(with_unknown, 120 * 60, split_by_project=True)), 1)
 
+    def test_peak_concurrent_activity_counts_all_provider_lanes(self):
+        base = datetime(2026, 3, 1, 9, 0, 0, tzinfo=timezone.utc)
+        usage = {**refresh_token_data.empty_day(), "totalTokens": 100}
+
+        def event(provider, minute, lane, subagent=False, swarm_eligible=True):
+            return refresh_token_data.UsageEvent(
+                provider,
+                base + timedelta(minutes=minute),
+                f"{provider}-model",
+                usage,
+                subagent=subagent,
+                lane=lane,
+                swarm_eligible=swarm_eligible,
+            )
+
+        events = [
+            event("codex", 0, "codex:a"),
+            event("codex", 40, "codex:a"),
+            event("claude", 10, "claude:b"),
+            event("claude", 50, "claude:b"),
+            event("opencode", 20, "opencode:c"),
+            event("opencode", 21, "opencode:c"),
+            event("codex", 30, "codex:subagent", subagent=True),
+            event("codex", 45, "codex:subagent", subagent=True),
+            event("codex", 35, "codex:forked-agent", swarm_eligible=False),
+        ]
+
+        by_day = refresh_token_data.peak_concurrent_activity_by_day(
+            events,
+            gap_seconds=120 * 60,
+            local_tz=refresh_token_data.ZoneInfo("UTC"),
+        )
+
+        self.assertEqual(by_day["2026-03-01"], 3)
+
+    def test_codex_process_counts_replace_transcript_lanes_for_swarm(self):
+        base = datetime(2026, 3, 1, 9, 0, 0, tzinfo=timezone.utc)
+        usage = {**refresh_token_data.empty_day(), "totalTokens": 100}
+        hour_key = base.replace(minute=0, second=0, microsecond=0)
+        events = [
+            refresh_token_data.UsageEvent("codex", base, "gpt-5.4", usage, lane="codex:a"),
+            refresh_token_data.UsageEvent("codex", base + timedelta(minutes=5), "gpt-5.4", usage, lane="codex:b"),
+            refresh_token_data.UsageEvent("codex", base + timedelta(minutes=10), "gpt-5.4", usage, lane="codex:c"),
+            refresh_token_data.UsageEvent("claude", base + timedelta(minutes=15), "claude-opus-4-7", usage, lane="claude:d"),
+        ]
+
+        by_day = refresh_token_data.peak_concurrent_activity_by_day(
+            events,
+            gap_seconds=120 * 60,
+            local_tz=refresh_token_data.ZoneInfo("UTC"),
+            codex_process_counts={("2026-03-01", hour_key): 1},
+        )
+
+        self.assertEqual(by_day["2026-03-01"], 2)
+
     def test_codex_highlights_scan_logs_and_task_turns_without_private_ids(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = copy_fixture("codex-only", Path(tmp))
@@ -282,6 +552,13 @@ class RefreshTokenDataTest(unittest.TestCase):
                 + '{"type":"event_msg","timestamp":"2026-01-02T12:14:30Z","payload":{"type":"task_complete","turn_id":"turn-private-a","last_agent_message":"private body omitted from export"}}\n'
                 + '{"type":"response_item","timestamp":"2026-01-02T12:15:00Z","payload":{"type":"function_call","name":"exec_command","call_id":"tool-private-a"}}\n'
                 + '{"type":"response_item","timestamp":"2026-01-02T12:16:00Z","payload":{"type":"web_search_call","id":"tool-private-b"}}\n',
+                encoding="utf-8",
+            )
+            peer_session_file = root / "codex/sessions/concurrent.jsonl"
+            peer_session_file.write_text(
+                '{"type":"session_meta","timestamp":"2026-01-02T12:09:00Z","payload":{"id":"concurrent-thread","model":"gpt-5.1-codex-mini"}}\n'
+                + '{"type":"turn_context","timestamp":"2026-01-02T12:09:01Z","payload":{"model":"gpt-5.1-codex-mini"}}\n'
+                + '{"type":"event_msg","timestamp":"2026-01-02T12:01:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":50},"last_token_usage":{"total_tokens":50,"input_tokens":30,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0}}}}\n',
                 encoding="utf-8",
             )
             logs_db = root / "logs_2.sqlite"
@@ -407,6 +684,7 @@ class RefreshTokenDataTest(unittest.TestCase):
                     "msg_real",
                     {
                         "role": "assistant",
+                        "subagent": True,
                         "modelID": "moonshotai/kimi-k2.6",
                         "providerID": "openrouter",
                         "time": {"created": 1736208000000},
@@ -464,6 +742,7 @@ class RefreshTokenDataTest(unittest.TestCase):
         self.assertEqual(opencode_stats["matchedAssistantEvents"], 2)
         self.assertEqual(opencode_stats["zeroTokenEvents"], 1)
         self.assertEqual(opencode_stats["countedModelCalls"], 1)
+        self.assertEqual(usage["subagentTotals"]["totalTokens"], 39194)
 
         providers_by_id = {provider["id"]: provider for provider in usage["providers"]}
         self.assertIn("opencode", providers_by_id)

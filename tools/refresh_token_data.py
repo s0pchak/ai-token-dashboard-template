@@ -62,10 +62,13 @@ class SourceDir:
 
 @dataclass(frozen=True)
 class SessionMeta:
+    session_id: str | None
+    parent_thread_id: str | None
     skip_until: datetime | None
     thread_source: str | None
     agent_nickname: str | None
     model: str | None
+    subagent: bool
 
 
 @dataclass(frozen=True)
@@ -76,6 +79,8 @@ class UsageEvent:
     usage: dict[str, int]
     subagent: bool = False
     project: str = ""
+    lane: str = ""
+    swarm_eligible: bool = True
 
 
 def get_local_tz() -> ZoneInfo:
@@ -99,6 +104,11 @@ def project_name(raw: str | None) -> str:
     text = text.rstrip("/")
     name = text.rsplit("/", 1)[-1] if "/" in text else text
     return name or ""
+
+
+def automated_lane_cwd(raw: str | None) -> bool:
+    """True for local agent-manager workspaces that should not count as terminals."""
+    return bool(raw and "/.paperclip/instances/" in str(raw))
 
 
 def normalize_owner_handle(value: str | None) -> str | None:
@@ -202,6 +212,20 @@ def read_session_meta(path: Path) -> SessionMeta | None:
     start = parse_timestamp(obj.get("timestamp") or payload.get("timestamp"))
     source = payload.get("source")
     source_is_subagent = isinstance(source, dict) and bool(source.get("subagent"))
+    subagent_source = source.get("subagent") if isinstance(source, dict) else None
+    subagent_thread_spawn = (
+        subagent_source.get("thread_spawn")
+        if isinstance(subagent_source, dict)
+        else {}
+    )
+    parent_thread_id = (
+        payload.get("forked_from_id")
+        or (
+            subagent_thread_spawn.get("parent_thread_id")
+            if isinstance(subagent_thread_spawn, dict)
+            else None
+        )
+    )
     forked = bool(payload.get("forked_from_id") or source_is_subagent)
 
     # Forked/subagent transcripts can begin with a copied parent history block that
@@ -209,10 +233,13 @@ def read_session_meta(path: Path) -> SessionMeta | None:
     # bootstrap without hiding the agent's own later model calls.
     skip_until = start + timedelta(seconds=2) if forked and start else None
     return SessionMeta(
+        session_id=payload.get("id"),
+        parent_thread_id=parent_thread_id,
         skip_until=skip_until,
         thread_source=payload.get("thread_source"),
         agent_nickname=payload.get("agent_nickname"),
         model=payload.get("model"),
+        subagent=source_is_subagent,
     )
 
 
@@ -268,6 +295,25 @@ def normalize_model(model: str | None) -> str:
     if not model:
         return "unknown"
     return str(model).strip() or "unknown"
+
+
+def first_turn_context_model(path: Path) -> str | None:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("type") != "turn_context":
+                    continue
+                payload = obj.get("payload") or {}
+                settings = ((payload.get("collaboration_mode") or {}).get("settings") or {})
+                model = payload.get("model") or settings.get("model")
+                return str(model).strip() if model else None
+    except OSError:
+        return None
+    return None
 
 
 def empty_day() -> dict[str, int]:
@@ -358,6 +404,87 @@ def peak_concurrent_by_day(db_path: Path, local_tz: ZoneInfo, earliest_date: str
     return by_day
 
 
+def codex_process_counts_by_hour(
+    db_path: Path,
+    local_tz: ZoneInfo,
+    earliest_date: str | None = None,
+) -> dict[tuple[str, datetime], int]:
+    """Distinct Codex process counts per local hour from the local process log."""
+    if not db_path.exists():
+        return {}
+    cutoff_ts = 0
+    if earliest_date:
+        parsed = parse_timestamp(f"{earliest_date}T00:00:00+00:00")
+        cutoff_ts = int(parsed.timestamp()) if parsed else 0
+    conn = None
+    cursor = None
+    by_hour: dict[tuple[str, datetime], int] = {}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        cursor = conn.execute(
+            """
+            SELECT (ts / 3600) * 3600 AS hour_ts, COUNT(DISTINCT process_uuid) AS process_count
+            FROM logs
+            WHERE ts >= ? AND process_uuid IS NOT NULL AND process_uuid != ''
+            GROUP BY hour_ts
+            """,
+            (cutoff_ts,),
+        )
+        for hour_ts, process_count in cursor.fetchall():
+            try:
+                hour = datetime.fromtimestamp(int(hour_ts), timezone.utc).astimezone(local_tz)
+            except (TypeError, ValueError, OSError):
+                continue
+            hour_key = hour.replace(minute=0, second=0, microsecond=0)
+            by_hour[(hour.date().isoformat(), hour_key)] = int(process_count)
+    except sqlite3.Error:
+        return {}
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+    return by_hour
+
+
+def peak_concurrent_activity_by_day(
+    events: list[UsageEvent],
+    gap_seconds: int,
+    local_tz: ZoneInfo,
+    codex_process_counts: dict[tuple[str, datetime], int] | None = None,
+) -> dict[str, int]:
+    """Peak distinct activity lanes per local hour across all imported tools.
+
+    A lane is the private transcript/session source used only during import:
+    Claude transcript file or OpenCode session id when available. Codex uses
+    process ids from logs_2.sqlite when available because a single terminal can
+    produce multiple session transcripts in the same hour. Private ids are
+    intentionally not emitted in usage.json. The count only includes lanes with
+    activity in the same local hour, so quiet tabs are not kept alive by the
+    active-time session gap.
+    """
+    codex_process_counts = codex_process_counts or {}
+    lanes_by_day_hour: dict[tuple[str, datetime], set[str]] = {}
+    for event in events:
+        if event.subagent or not event.swarm_eligible:
+            continue
+        if event.provider == "codex" and codex_process_counts:
+            continue
+        lane = event.lane or f"{event.provider}:{event.project or event.model or 'unknown'}"
+        local_ts = event.timestamp.astimezone(local_tz)
+        day_key = local_ts.date().isoformat()
+        hour_key = local_ts.replace(minute=0, second=0, microsecond=0)
+        lanes_by_day_hour.setdefault((day_key, hour_key), set()).add(lane)
+
+    by_day: dict[str, int] = {}
+    all_hour_keys = set(lanes_by_day_hour) | set(codex_process_counts)
+    for key in all_hour_keys:
+        day_key, _hour_key = key
+        count = len(lanes_by_day_hour.get(key, set())) + int(codex_process_counts.get(key, 0))
+        by_day[day_key] = max(by_day.get(day_key, 0), count)
+    return by_day
+
+
 def codex_session_records_by_day(source_dirs: list[SourceDir], local_tz: ZoneInfo) -> dict[str, dict]:
     """Per-local-day Codex records: longest single task turn (seconds) and the
     biggest tool-call pileup in one session. Bucketed by day so the dashboard
@@ -440,16 +567,18 @@ def build_highlights(days: list[dict], session_summary: dict | None = None) -> d
         return None
 
     concurrency_day = best_day("peakConcurrentTerminals")
+    if concurrency_day and int(concurrency_day.get("peakConcurrentTerminals") or 0) < 2:
+        concurrency_day = None
     task_turn_day = best_day("longestTaskTurnSeconds")
     tool_pileup_day = best_day("toolCallPileup")
     return {
         "peakConcurrentTerminals": {
             "label": "Terminal swarm",
             "value": f"{int(concurrency_day['peakConcurrentTerminals']):,}" if concurrency_day else "N/A",
-            "detail": "Peak Codex processes in one local hour." if concurrency_day else "No local Codex log database found.",
+            "detail": "Peak human-visible tool lanes with activity in one local hour." if concurrency_day else "No overlapping activity lanes found.",
             "date": concurrency_day["date"] if concurrency_day else None,
             "count": int(concurrency_day["peakConcurrentTerminals"]) if concurrency_day else None,
-            "source": "codex_logs",
+            "source": "activity_lanes",
         },
         "peakDay": {
             "label": "Most tokens",
@@ -489,15 +618,48 @@ def build_highlights(days: list[dict], session_summary: dict | None = None) -> d
 def import_codex_usage(source_dirs: list[SourceDir]) -> tuple[list[UsageEvent], dict]:
     session_files = iter_session_files(source_dirs)
     metas: dict[str, SessionMeta] = {}
+    paths_by_session_id: dict[str, Path] = {}
     for session_file in session_files:
         meta = read_session_meta(session_file)
         if meta:
             metas[str(session_file)] = meta
+            if meta.session_id:
+                paths_by_session_id[meta.session_id] = session_file
 
     seen_totals_by_file: dict[str, set[int]] = {}
     current_model_by_file: dict[str, str] = {
         path: normalize_model(meta.model) for path, meta in metas.items() if meta.model
     }
+    model_cache_by_path: dict[str, str | None] = {}
+
+    def inherited_model_for_path(path: Path, seen: set[str] | None = None) -> str | None:
+        path_key = str(path)
+        if path_key in model_cache_by_path:
+            return model_cache_by_path[path_key]
+        if seen is None:
+            seen = set()
+        if path_key in seen:
+            return None
+        seen.add(path_key)
+
+        meta = metas.get(path_key)
+        model = normalize_model(meta.model) if meta and meta.model else first_turn_context_model(path)
+        if model and model != "unknown":
+            model_cache_by_path[path_key] = model
+            return model
+
+        parent_path = paths_by_session_id.get(meta.parent_thread_id) if meta and meta.parent_thread_id else None
+        parent_model = inherited_model_for_path(parent_path, seen) if parent_path else None
+        model_cache_by_path[path_key] = parent_model
+        return parent_model
+
+    for path, meta in metas.items():
+        if meta.model or not meta.parent_thread_id:
+            continue
+        inherited_model = inherited_model_for_path(Path(path))
+        if inherited_model:
+            current_model_by_file[path] = inherited_model
+
     current_project_by_file: dict[str, str] = {}
     stats = {
         "sessionFiles": len(session_files),
@@ -582,7 +744,10 @@ def import_codex_usage(source_dirs: list[SourceDir]) -> tuple[list[UsageEvent], 
         }
         events.append(UsageEvent(
             "codex", event_ts, model, usage_delta,
+            subagent=bool(meta and meta.subagent),
             project=current_project_by_file.get(str(path), ""),
+            lane=f"codex:{path}",
+            swarm_eligible=not bool(meta and (meta.subagent or meta.parent_thread_id or meta.agent_nickname)),
         ))
         stats["countedModelCalls"] += 1
 
@@ -668,10 +833,13 @@ def import_claude_usage(projects_source: SourceDir) -> tuple[list[UsageEvent], d
                 if total_tokens <= 0:
                     stats["zeroTokenEvents"] += 1
                     continue
+                claude_cwd = obj.get("cwd")
                 event = UsageEvent(
                     "claude", event_ts, model, usage_delta,
                     subagent=is_subagent_file,
-                    project=project_name(obj.get("cwd")),
+                    project=project_name(claude_cwd),
+                    lane=f"claude:{transcript_file}",
+                    swarm_eligible=not is_subagent_file and not automated_lane_cwd(claude_cwd),
                 )
                 dedupe_key = (str(transcript_file), str(message_id))
                 current = selected.get(dedupe_key)
@@ -771,9 +939,24 @@ def import_opencode_usage(db_source: SourceDir) -> tuple[list[UsageEvent], dict]
                 stats["zeroTokenEvents"] += 1
                 continue
             opencode_cwd = ((obj.get("path") or {}).get("cwd")) or ((obj.get("path") or {}).get("root"))
+            opencode_project = project_name(opencode_cwd)
+            opencode_session_id = (
+                obj.get("sessionID")
+                or obj.get("sessionId")
+                or obj.get("session_id")
+                or obj.get("conversationID")
+                or obj.get("conversationId")
+                or obj.get("chatID")
+                or obj.get("chatId")
+            )
+            if not opencode_session_id and isinstance(obj.get("session"), dict):
+                opencode_session_id = obj["session"].get("id")
             events.append(UsageEvent(
                 "opencode", event_ts, model, usage_delta,
-                project=project_name(opencode_cwd),
+                subagent=bool(obj.get("subagent")),
+                project=opencode_project,
+                lane=f"opencode:{opencode_session_id or opencode_project or 'default'}",
+                swarm_eligible=not bool(obj.get("subagent")) and not automated_lane_cwd(opencode_cwd),
             ))
     except sqlite3.DatabaseError:
         stats["dbErrors"] += 1
@@ -980,8 +1163,13 @@ def build_usage() -> dict:
     # separate lanes instead of shredding into micro-sessions.
     session_summary["byProject"] = project_session_rows(all_events, session_gap_seconds, local_tz)
 
-    # Per-day Codex records so the dashboard can take the max over any range.
-    concurrency_by_day = peak_concurrent_by_day(get_codex_logs_db_path(), local_tz)
+    # Per-day all-tool records so the dashboard can take the max over any range.
+    concurrency_by_day = peak_concurrent_activity_by_day(
+        all_events,
+        session_gap_seconds,
+        local_tz,
+        codex_process_counts=codex_process_counts_by_hour(get_codex_logs_db_path(), local_tz),
+    )
     codex_records_by_day = codex_session_records_by_day(codex_sources, local_tz)
 
     by_day: dict[str, dict[str, int]] = {}
@@ -1125,11 +1313,11 @@ def build_usage() -> dict:
         "lastDate": days[-1]["date"] if days else None,
         "methodology": {
             "usageField": "Codex last_token_usage.total_tokens; Claude message.usage token fields; OpenCode message.tokens (input/output/reasoning/cache.read/cache.write) from opencode.db.",
-            "modelField": "Codex nearest prior turn_context.payload.model within each session transcript; Claude message.model; OpenCode message.modelID.",
+            "modelField": "Codex nearest prior turn_context.payload.model within each session transcript, with forked/subagent transcripts inheriting the parent thread model when the child omits one; Claude message.model; OpenCode message.modelID.",
             "dedupe": "Codex counts repeated total_token_usage.total_tokens once per session file. Claude keeps one row per transcript path and message.id, choosing the largest token total and latest timestamp on ties. OpenCode reads one row per assistant message (the table is keyed by message id).",
-            "forkHandling": "Codex forked/subagent sessions skip token_count events in the first two seconds to avoid copied parent history. Claude subagents/sidechains are included. OpenCode includes all assistant messages with non-zero tokens.",
+            "forkHandling": "Codex forked/source.subagent sessions skip token_count events in the first two seconds to avoid copied parent history. Codex source.subagent sessions, Claude /subagents/ transcripts, and OpenCode messages with subagent=true mark subagent usage.",
             "sessionDuration": f"Continuous sessions: events across all providers are sorted by time, and a new session starts on a silent gap longer than DASHBOARD_SESSION_GAP_MINUTES ({session_summary['gapMinutes']}m default 120m). Per-day session length is the session time that falls on that local day (cross-midnight sessions are split). In-session resets like /clear do not split a session. The history timeline (sessions.byProject) sessionizes each project's events independently so concurrent work on different repos shows as separate lanes.",
-            "highlights": "Aggregate-only all-time highlights. Long task-turn highlights ignore paired task events over 12 hours to avoid stale resumed tabs. Tool pileup counts tool-call response items per Codex session transcript. API street value is computed client-side from data/pricing.js.",
+            "highlights": "Aggregate-only all-time highlights. Terminal swarm counts Codex process ids plus human-visible non-Codex activity lanes in one local hour; forked/subagent lanes are excluded and private ids are not exported. Long task-turn highlights ignore paired task events over 12 hours to avoid stale resumed tabs. Tool pileup counts tool-call response items per Codex session transcript. API street value is computed client-side from data/pricing.js.",
             "scope": "Local Codex, Claude Code, and OpenCode transcripts only; not account billing truth.",
         },
         "stats": stats,

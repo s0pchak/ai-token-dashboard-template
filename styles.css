@@ -766,6 +766,7 @@ dt {
 }
 
 #dailyChart {
+  box-sizing: border-box;
   display: block;
   width: 100%;
   height: 100%;
@@ -817,6 +818,14 @@ dt {
   line-height: 1;
   letter-spacing: 0;
   font-variant-numeric: tabular-nums;
+}
+
+.tooltip .tip-total small {
+  display: inline;
+  color: var(--muted);
+  font-size: 0.45em;
+  font-weight: 850;
+  white-space: nowrap;
 }
 
 .tip-metrics {
@@ -1525,11 +1534,26 @@ tbody tr.selected {
 
 .hero-title {
   grid-area: title;
+  display: grid;
+  align-content: end;
+  gap: 4px;
+  min-width: 0;
+}
+
+.hero-metric-line {
   display: flex;
   align-items: baseline;
-  gap: 16px;
+  gap: 8px 16px;
   min-width: 0;
   flex-wrap: wrap;
+}
+
+.hero-plan-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  min-height: 19px;
+  min-width: 0;
 }
 
 h1 {
@@ -2230,6 +2254,38 @@ h1 {
   align-items: flex-start;
   gap: 12px;
   margin-bottom: 14px;
+  padding: 0;
+}
+
+.heatmap-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: stretch;
+  flex: 1 1 520px;
+  gap: 8px;
+  min-width: 0;
+}
+
+.heatmap-metric {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.heatmap-period {
+  flex: 0 0 auto;
+}
+
+.heatmap-controls .segmented {
+  width: auto;
+}
+
+.heatmap-controls .segmented button {
+  flex: 0 0 auto;
+}
+
+.pattern-heatmap .panel-head > div:first-child {
+  flex: 0 1 230px;
 }
 
 .pattern-heatmap {
@@ -2237,22 +2293,32 @@ h1 {
 }
 
 .heatmap-scroll {
+  --heatmap-cell: 12px;
+  --heatmap-gap: 3px;
+  container-type: inline-size;
   overflow-x: auto;
   padding-bottom: 4px;
+}
+
+@supports (width: 1cqw) and (width: calc(100px / 2)) {
+  .heatmap-scroll {
+    --heatmap-cell: clamp(12px, calc((100cqw - 156px) / 53), 26px);
+  }
 }
 
 .heatmap-grid {
   display: inline-flex;
   flex-direction: column;
-  gap: 4px;
-  min-width: min-content;
+  gap: var(--heatmap-gap);
+  width: max-content;
+  min-width: 100%;
 }
 
 .heatmap-months {
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: 12px;
-  gap: 3px;
+  grid-auto-columns: var(--heatmap-cell);
+  gap: var(--heatmap-gap);
   height: 13px;
 }
 
@@ -2275,14 +2341,14 @@ h1 {
 .heatmap-wrap {
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: 12px;
-  grid-template-rows: repeat(7, 12px);
-  gap: 3px;
+  grid-auto-columns: var(--heatmap-cell);
+  grid-template-rows: repeat(7, var(--heatmap-cell));
+  gap: var(--heatmap-gap);
 }
 
 .heatmap-cell {
-  width: 12px;
-  height: 12px;
+  width: var(--heatmap-cell);
+  height: var(--heatmap-cell);
   border-radius: 2px;
   background: rgba(245, 241, 232, 0.06);
   border: 1px solid rgba(245, 241, 232, 0.04);
@@ -2373,10 +2439,68 @@ h1 {
   display: grid;
   grid-template-columns: repeat(24, 1fr);
   align-items: end;
-  gap: 4px;
-  height: 140px;
-  padding-bottom: 18px;
+  gap: 3px;
+  height: 114px;
+  padding-bottom: 16px;
   position: relative;
+}
+
+.pattern-hours {
+  position: relative;
+}
+
+#hoursTip {
+  position: absolute;
+  z-index: 6;
+  top: 0;
+  left: 0;
+  width: min(300px, calc(100% - 24px));
+  padding: 12px 14px 13px;
+  border: 1px solid rgba(215, 255, 69, 0.58);
+  border-radius: 6px;
+  background:
+    linear-gradient(135deg, rgba(215, 255, 69, 0.12), transparent 46%),
+    linear-gradient(180deg, rgba(245, 241, 232, 0.08), transparent),
+    rgba(5, 7, 8, 0.97);
+  box-shadow:
+    0 0 34px rgba(215, 255, 69, 0.12),
+    8px 8px 0 rgba(0, 0, 0, 0.52);
+  pointer-events: none;
+  transform: translate(-50%, calc(-100% - 12px));
+  overflow-wrap: anywhere;
+}
+
+#hoursTip span,
+#hoursTip strong {
+  display: block;
+}
+
+#hoursTip .tip-hour,
+#hoursTip .tip-label {
+  color: var(--quiet);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+#hoursTip .tip-value {
+  margin-top: 5px;
+  color: var(--ink);
+  font-size: clamp(22px, 2vw, 30px);
+  font-weight: 950;
+  line-height: 1;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+#hoursTip .tip-share {
+  margin-top: 8px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .hour-bar {
@@ -2412,29 +2536,50 @@ h1 {
 .subagent-wrap {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
+  justify-content: center;
   gap: 12px;
+  min-height: 132px;
 }
 
 .subagent-bar {
   position: relative;
-  height: 18px;
+  height: 22px;
   border-radius: 4px;
-  background: rgba(245, 241, 232, 0.06);
+  background: rgba(255, 95, 135, 0.18);
   overflow: hidden;
+  box-shadow:
+    inset 0 0 0 1px rgba(245, 241, 232, 0.08),
+    0 0 24px rgba(255, 95, 135, 0.12);
 }
 
-.subagent-bar b {
+.subagent-bar b,
+.subagent-bar i {
   position: absolute;
   inset: 0;
   width: 0%;
-  background: linear-gradient(135deg, var(--acid), var(--cyan));
+  display: block;
+  font-style: normal;
   transition: width 220ms ease;
+}
+
+.subagent-bar .subagent-segment {
+  right: auto;
+  background: linear-gradient(90deg, #00e5ff, var(--green));
+  box-shadow: 0 0 24px rgba(98, 216, 255, 0.52);
+}
+
+.subagent-bar .main-segment {
+  right: 0;
+  width: auto;
+  background: linear-gradient(90deg, var(--rose), var(--amber));
+  box-shadow: 0 0 22px rgba(255, 95, 135, 0.38);
 }
 
 .subagent-stats {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: 16px;
   font-family: var(--mono);
   font-size: 12px;
   letter-spacing: 0.04em;
@@ -2453,47 +2598,204 @@ h1 {
   text-transform: none;
 }
 
+.subagent-stats small {
+  display: block;
+  margin-top: 1px;
+  font-family: Inter, system-ui, sans-serif;
+  font-size: clamp(24px, 2.2vw, 34px);
+  font-weight: 950;
+  line-height: 0.95;
+  letter-spacing: 0;
+  text-transform: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.subagent-stats div:first-child strong,
+.subagent-stats div:first-child small {
+  color: var(--cyan);
+  text-shadow: 0 0 18px rgba(98, 216, 255, 0.32);
+}
+
+.subagent-stats div:last-child strong,
+.subagent-stats div:last-child small {
+  color: var(--rose);
+  text-shadow: 0 0 18px rgba(255, 95, 135, 0.3);
+}
+
+.pattern-subagent {
+  display: flex;
+  flex-direction: column;
+}
+
+.pattern-subagent .panel-head p {
+  max-width: 100%;
+  white-space: normal;
+}
+
 @media (max-width: 900px) {
   .patterns {
     grid-template-columns: 1fr;
   }
+
+  .pattern-heatmap .panel-head > div:first-child,
+  .heatmap-controls {
+    flex: 0 0 auto;
+  }
+
+  .heatmap-controls {
+    justify-content: flex-start;
+    width: 100%;
+  }
 }
 
-/* Hero: reserve two lines so toggling the metric / showing the cost pill
-   never reflows content below the hero. */
+@media (max-width: 620px) {
+  html,
+  body,
+  * {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  html::-webkit-scrollbar,
+  body::-webkit-scrollbar,
+  *::-webkit-scrollbar {
+    width: 0 !important;
+    height: 0 !important;
+    display: none !important;
+  }
+
+  .pattern-panel {
+    padding: 14px;
+  }
+
+  .pattern-panel .panel-head {
+    margin-bottom: 10px;
+  }
+
+  .pattern-heatmap .panel-head {
+    position: static;
+  }
+
+  .heatmap-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    justify-content: stretch;
+    gap: 8px;
+  }
+
+  .heatmap-controls .segmented {
+    width: auto;
+    min-height: 34px;
+  }
+
+  .heatmap-controls .segmented button {
+    flex: 0 0 auto;
+    min-width: 54px;
+    min-height: 34px;
+  }
+
+  .heatmap-metric {
+    grid-column: 1 / -1;
+    flex: 1 1 100%;
+  }
+
+  .heatmap-metric.segmented {
+    width: 100%;
+  }
+
+  .heatmap-metric.segmented button {
+    flex: 1 1 0;
+  }
+
+  .heatmap-period.segmented {
+    grid-column: 2;
+    justify-self: end;
+    flex: 0 0 auto;
+    min-height: 28px;
+    box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.4);
+  }
+
+  .heatmap-period.segmented button {
+    min-width: 43px;
+    min-height: 28px;
+    padding-right: 8px;
+    padding-left: 8px;
+    font-size: 10px;
+  }
+
+  .heatmap-legend {
+    padding-right: 0;
+    min-height: 30px;
+    align-items: center;
+  }
+
+  .hours-wrap {
+    height: 96px;
+    padding-bottom: 14px;
+  }
+
+  .subagent-wrap {
+    gap: 10px;
+    min-height: 108px;
+  }
+
+  .subagent-bar {
+    height: 20px;
+  }
+
+  .subagent-stats {
+    gap: 12px;
+  }
+
+  .subagent-stats strong {
+    font-size: 20px;
+  }
+
+  .subagent-stats small {
+    font-size: 25px;
+  }
+}
+
+/* Hero: reserve a stable pill row so metric changes do not move the plan badge. */
 .hero-title {
   align-content: end;
-  gap: 10px 16px;
+  gap: 5px;
   min-height: calc(1.7 * clamp(40px, 4.4vw, 66px));
-  flex-wrap: wrap;
 }
 
 #heroTotalUnit {
   white-space: nowrap;
 }
 
+.hero-estimate {
+  display: inline-block;
+  margin-left: 0.08em;
+  font-size: 0.36em;
+  line-height: 1;
+  vertical-align: baseline;
+  text-shadow: 2px 2px 0 rgba(0, 0, 0, 0.46);
+}
+
 .plan-pill {
   display: inline-flex;
   align-items: center;
-  padding: 5px 12px;
+  max-width: 100%;
+  padding: 3px 8px;
   border-radius: 999px;
   background: linear-gradient(135deg, var(--acid), var(--green));
   color: #060709;
   font-family: var(--mono);
-  font-size: clamp(13px, 1.2vw, 16px);
+  font-size: clamp(10px, 0.8vw, 12px);
   font-weight: 800;
   letter-spacing: 0;
-  line-height: 1;
-  white-space: nowrap;
+  line-height: 1.12;
+  text-align: left;
+  white-space: normal;
   box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.32);
-  transform: translateY(-3px);
 }
 
-/* The base stylesheet locks the desktop view to a single 100svh screen
-   (hero + workspace + highlights, no scroll). The added hour/subagent and
-   calendar-heatmap sections make that impossible, so on desktop we let the
-   page scroll normally and give the chart a definite height again instead of
-   flexing to fill a viewport-locked row. */
+/* Desktop keeps the screenshot surface tight: hero + chart/receipts + six
+   stats fill the first viewport, with the pattern panels starting below it. */
 @media (min-width: 1181px) {
   body {
     overflow: auto;
@@ -2502,32 +2804,47 @@ h1 {
   .shell {
     display: block;
     height: auto;
-    min-height: 0;
+    min-height: 100svh;
   }
 
   .workspace {
     margin-top: 18px;
+    height: max(420px, calc(100svh - 309px));
+    min-height: 0;
+    align-items: stretch;
   }
 
   .chart-panel,
   .side-rail,
   .side-panel {
-    height: auto;
+    height: 100%;
+    min-height: 0;
+  }
+
+  .chart-panel,
+  .side-panel {
+    display: flex;
+    flex-direction: column;
   }
 
   .side-panel {
-    overflow: visible;
+    overflow: hidden;
   }
 
   .chart-wrap {
-    flex: 0 0 auto;
-    height: clamp(390px, 51vh, 560px);
-    min-height: 390px;
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
   }
 
   .model-mix {
-    flex: 0 1 auto;
-    overflow: visible;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .highlight-strip {
+    margin-top: 14px;
   }
 }
 
@@ -2542,6 +2859,14 @@ h1 {
   background: rgba(245, 241, 232, 0.05);
 }
 
+.model-row.synthetic {
+  cursor: default;
+}
+
+.model-row.synthetic:hover {
+  background: transparent;
+}
+
 .model-row:focus-visible {
   outline: 2px solid var(--cyan);
   outline-offset: 1px;
@@ -2549,6 +2874,10 @@ h1 {
 
 .model-mix.has-isolation .model-row:not(.isolated) {
   opacity: 0.36;
+}
+
+.model-mix.has-isolation .model-row.synthetic {
+  opacity: 0.54;
 }
 
 .model-row.isolated {

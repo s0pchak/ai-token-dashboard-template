@@ -32,9 +32,13 @@
         <div class="hero-copy">
           <p class="eyebrow">The Maxx Report</p>
           <div class="hero-title">
-            <h1><span id="heroTotal">--</span> <span id="heroTotalUnit">output tokens</span></h1>
-            <span class="hero-owner" id="ownerHandle" hidden></span>
-            <span class="plan-pill" id="planPill" hidden></span>
+            <div class="hero-metric-line">
+              <h1><span id="heroTotal">--</span> <span id="heroTotalUnit">total tokens</span></h1>
+              <span class="hero-owner" id="ownerHandle" hidden></span>
+            </div>
+            <div class="hero-plan-row">
+              <span class="plan-pill" id="planPill" hidden></span>
+            </div>
           </div>
           <div class="hero-actions">
             <div class="hero-tagline-row">
@@ -67,15 +71,15 @@
         <div class="chart-panel">
           <div class="panel-head">
             <div>
-              <h2>Daily Token Load</h2>
+              <h2 id="chartTitle">Total Token Load</h2>
               <p id="rangeCaption">--</p>
             </div>
             <div class="controls" aria-label="Range and metric">
               <div class="segmented" role="group" aria-label="Metric">
-                <button type="button" class="active" data-metric="output" title="Tokens Claude actually generated. Full price. The honest number.">Output</button>
-                <button type="button" data-metric="new" title="Output + fresh input + cache creation. Excludes cache reads.">New</button>
-                <button type="button" data-metric="total" title="Everything including cache reads. Inflated by 1M-context cache replays.">Total</button>
-                <button type="button" data-metric="cost" title="Approximate USD spend per day using data/pricing.js rates.">$ Cost</button>
+                <button type="button" class="active" data-metric="total">TOTAL</button>
+                <button type="button" data-metric="new">NEW</button>
+                <button type="button" data-metric="output">OUTPUT</button>
+                <button type="button" data-metric="cost">$ COST</button>
               </div>
               <div class="segmented" role="group" aria-label="Range">
                 <button type="button" class="active" data-range="all">All</button>
@@ -104,9 +108,7 @@
             <h2>Model Receipts</h2>
             <div class="model-mix" id="modelMix"></div>
             <p class="session-definition" id="sessionDefinition">
-              Active time per day. A continuous session ends after a 2h+ quiet
-              gap (across all tools); /clear doesn't end one. The gold line is
-              that day's active time.
+              Active Time Per Day: Length of time where any tool was generating tokens without a 2 hour gap.
             </p>
           </section>
         </aside>
@@ -123,6 +125,7 @@
             </div>
           </div>
           <div class="hours-wrap" id="hoursWrap" aria-label="Hour of day histogram"></div>
+          <div class="hours-tip" id="hoursTip" hidden></div>
         </div>
 
         <div class="pattern-panel pattern-subagent">
@@ -143,7 +146,15 @@
               <h2>Calendar Heatmap</h2>
               <p id="heatmapCaption">--</p>
             </div>
-            <div class="segmented heatmap-period" id="heatmapPeriod" role="group" aria-label="Heatmap period"></div>
+            <div class="heatmap-controls">
+              <div class="segmented heatmap-metric" role="group" aria-label="Heatmap metric">
+                <button type="button" class="active" data-metric="total">TOTAL</button>
+                <button type="button" data-metric="new">NEW</button>
+                <button type="button" data-metric="output">OUTPUT</button>
+                <button type="button" data-metric="cost">$ COST</button>
+              </div>
+              <div class="segmented heatmap-period" id="heatmapPeriod" role="group" aria-label="Heatmap period"></div>
+            </div>
           </div>
           <div class="heatmap-scroll">
             <div class="heatmap-grid">

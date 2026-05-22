@@ -12,7 +12,7 @@ const usage = window.AI_TOKEN_USAGE || window.CODEX_TOKEN_USAGE || {
 
 const state = {
   range: "all",
-  metric: "output",
+  metric: "total",
   heatmapPeriod: "12mo",
   showSessionLine: true,
   isolatedModel: null,
@@ -22,32 +22,86 @@ const state = {
   chartGeometry: null,
 };
 
-const METRIC_LABEL = {
-  output: "output tokens",
-  new: "new tokens (excl. cache reads)",
-  total: "total tokens (incl. cache reads)",
-  cost: "estimated USD",
-};
-
-const METRIC_SHORT = {
-  output: "output",
-  new: "new",
-  total: "total",
-  cost: "cost",
-};
-
-// Short, fixed-width-ish labels for the hero so switching metrics does not
-// reflow the headline. The verbose labels (METRIC_LABEL) still appear in the
-// caption and tooltips.
-const METRIC_UNIT = {
-  output: "output tokens",
-  new: "new tokens",
-  total: "total tokens",
-  cost: "spend (est.)",
+const METRIC_META = {
+  total: {
+    buttonLabel: "TOTAL",
+    label: "total tokens (incl. cache reads)",
+    short: "total",
+    unit: "total tokens",
+    description: "Everything including cache reads. Inflated by 1M-context cache replays.",
+    chartTitle: "Total Token Load",
+    rangeLabel: "total tokens (incl. cache reads)",
+    recordLabel: "Most total",
+    tooltipLabel: "total tokens (incl. cache reads)",
+  },
+  new: {
+    buttonLabel: "NEW",
+    label: "new tokens (excl. cache reads)",
+    short: "new",
+    unit: "new tokens",
+    description: "Output + fresh input + cache creation. Excludes cache reads.",
+    chartTitle: "New Token Load",
+    rangeLabel: "new tokens (excl. cache reads)",
+    recordLabel: "Most new",
+    tooltipLabel: "new tokens (excl. cache reads)",
+  },
+  output: {
+    buttonLabel: "OUTPUT",
+    label: "output tokens",
+    short: "output",
+    unit: "output tokens",
+    description: "Tokens Claude actually generated. Full price. The honest number.",
+    chartTitle: "Output Token Load",
+    rangeLabel: "output tokens",
+    recordLabel: "Most output",
+    tooltipLabel: "output tokens",
+  },
+  cost: {
+    buttonLabel: "$ COST",
+    label: "estimated USD",
+    short: "cost",
+    unit: "spend",
+    unitSuffix: "(est.)",
+    description: "Approximate USD spend per day using data/pricing.js rates.",
+    chartTitle: "Total Cost (est.)",
+    rangeLabel: "estimated USD",
+    recordLabel: "Most spend",
+    tooltipLabel: "estimated USD",
+  },
 };
 
 const PRICING = window.AI_PRICING || { default: { input: 0, cacheRead: 0, output: 0 }, models: {} };
 const PLAN = window.AI_PLAN || { usdPerMonth: 0, label: "" };
+
+function metricMeta(metric = state.metric) {
+  return METRIC_META[metric] || METRIC_META.total;
+}
+
+function metricLabel(metric = state.metric) {
+  return metricMeta(metric).label;
+}
+
+function metricSentenceLabel(metric = state.metric) {
+  return metricLabel(metric).replace(/^./, (char) => char.toUpperCase());
+}
+
+function metricTooltipLabelHtml(metric = state.metric) {
+  const meta = metricMeta(metric);
+  if (metric === "total") return 'total tokens <small>(incl. cache reads)</small>';
+  if (metric === "new") return 'new tokens <small>(excl. cache reads)</small>';
+  return escapeHtml(meta.tooltipLabel);
+}
+
+function metricShort(metric = state.metric) {
+  return metricMeta(metric).short;
+}
+
+function metricUnitHtml(metric = state.metric) {
+  const meta = metricMeta(metric);
+  const unit = escapeHtml(meta.unit);
+  if (!meta.unitSuffix) return unit;
+  return `${unit} <span class="hero-estimate">${escapeHtml(meta.unitSuffix)}</span>`;
+}
 
 function planCostForRange(days) {
   const perMonth = Number(PLAN.usdPerMonth || 0);
@@ -171,6 +225,8 @@ const modelPalette = [
 ];
 
 const modelColors = new Map();
+const OTHER_MODEL_LABEL = "unattributed";
+const OTHER_MODEL_COLOR = "#8a9692";
 (usage.models || []).forEach((model, index) => {
   modelColors.set(model.name, modelPalette[index % modelPalette.length]);
 });
@@ -187,6 +243,7 @@ const els = {
   durationDate: document.querySelector("#durationDate"),
   topModel: document.querySelector("#topModel"),
   topModelShare: document.querySelector("#topModelShare"),
+  chartTitle: document.querySelector("#chartTitle"),
   rangeCaption: document.querySelector("#rangeCaption"),
   tableCaption: document.querySelector("#tableCaption"),
   chart: document.querySelector("#dailyChart"),
@@ -200,6 +257,7 @@ const els = {
   heroTotalUnit: document.querySelector("#heroTotalUnit"),
   heroCaption: document.querySelector("#heroCaption"),
   planPill: document.querySelector("#planPill"),
+  heatmapScroll: document.querySelector(".heatmap-scroll"),
   heatmapWrap: document.querySelector("#heatmapWrap"),
   heatmapMonths: document.querySelector("#heatmapMonths"),
   heatmapCaption: document.querySelector("#heatmapCaption"),
@@ -209,6 +267,8 @@ const els = {
   heatmapPanel: document.querySelector(".pattern-heatmap"),
   hoursWrap: document.querySelector("#hoursWrap"),
   hoursCaption: document.querySelector("#hoursCaption"),
+  hoursTip: document.querySelector("#hoursTip"),
+  hoursPanel: document.querySelector(".pattern-hours"),
   subagentWrap: document.querySelector("#subagentWrap"),
   subagentCaption: document.querySelector("#subagentCaption"),
   historyScroll: document.querySelector("#historyScroll"),
@@ -245,6 +305,7 @@ function setHtml(element, value) {
 }
 
 function colorForModel(name) {
+  if (name === OTHER_MODEL_LABEL) return OTHER_MODEL_COLOR;
   if (modelColors.has(name)) return modelColors.get(name);
   let hash = 0;
   for (const char of String(name)) {
@@ -291,6 +352,35 @@ function isVisibleModelName(name) {
 
 function visibleModels(models = []) {
   return models.filter((model) => isVisibleModelName(model.name));
+}
+
+function hiddenModelTotals(days = []) {
+  return days.reduce((totals, day) => {
+    (day.models || []).forEach((model) => {
+      if (isVisibleModelName(model.name)) return;
+      addTotals(totals, model);
+    });
+    return totals;
+  }, emptyTotals());
+}
+
+function chartSegmentsForDay(day, orderedModels, dayTotal) {
+  const visible = visibleModels(day.models || []);
+  const modelMap = new Map(visible.map((model) => [model.name, model]));
+  const segments = [];
+  let visibleTotal = 0;
+  orderedModels.forEach((modelName) => {
+    const modelEntry = modelMap.get(modelName);
+    const value = modelEntry ? metricValue(modelEntry) : 0;
+    if (!value) return;
+    visibleTotal += value;
+    segments.push({ name: modelName, value, color: colorForModel(modelName) });
+  });
+  const remainder = Math.max(Number(dayTotal || 0) - visibleTotal, 0);
+  if (remainder > Math.max(Number(dayTotal || 0) * 0.001, 0.01)) {
+    segments.push({ name: OTHER_MODEL_LABEL, value: remainder, color: OTHER_MODEL_COLOR });
+  }
+  return segments;
 }
 
 function compactNumber(value = 0) {
@@ -421,6 +511,22 @@ function providerLabel(model = {}) {
     || providerFromValue(globalModel?.provider || globalModel?.providerName)
     || providerFromRegistry(model.name)
   );
+}
+
+const SUBAGENT_ELIGIBLE_PROVIDERS = new Set(["codex", "claude code", "opencode"]);
+
+function isSubagentEligibleProvider(model = {}) {
+  return SUBAGENT_ELIGIBLE_PROVIDERS.has(String(providerLabel(model)).trim().toLowerCase());
+}
+
+function eligibleSubagentProviderTotal(days = []) {
+  return days.reduce((total, day) => {
+    const models = day.models || [];
+    return total + models.reduce(
+      (dayTotal, model) => dayTotal + (isSubagentEligibleProvider(model) ? metricValue(model) : 0),
+      0,
+    );
+  }, 0);
 }
 
 function modelTitle(model = {}) {
@@ -577,8 +683,8 @@ function buildHighlightItems() {
       label: "Terminal Swarm",
       value: concDay ? fullNumber(concDay.peakConcurrentTerminals) : "N/A",
       detail: concDay
-        ? `${formatDateLong(concDay.date)} ran the most Codex terminals at once.`
-        : "Peak Codex terminals running in one hour.",
+        ? `${formatDateLong(concDay.date)} had the most AI coding terminals active at once.`
+        : "Peak simultaneous Codex, Claude Code, and OpenCode lanes.",
     },
     {
       label: "Peak Day",
@@ -646,7 +752,7 @@ function modelRaceLine(race = moments.modelRace) {
 function headlineLine() {
   const peak = moments.peakDay;
   if (!peak) return "No token events yet. Suspense is cheap.";
-  return `${formatMetric(moments.totalTokens)} ${METRIC_LABEL[state.metric]} across ${fullNumber(moments.days.length)} logged days.`;
+  return `${formatMetric(moments.totalTokens)} ${metricLabel()} across ${fullNumber(moments.days.length)} logged days.`;
 }
 
 function incidentTone(day) {
@@ -660,13 +766,13 @@ function incidentTone(day) {
   }
   const value = metricValue(day);
   if (value >= billionTokens) {
-    return `This day cleared 1B ${METRIC_SHORT[state.metric]} tokens. The y-axis needed a meeting.`;
+    return `This day cleared 1B ${metricShort()} tokens. The y-axis needed a meeting.`;
   }
   if (value >= halfBillionTokens) {
-    return `This day cleared 500M ${METRIC_SHORT[state.metric]} tokens and still tried to look casual.`;
+    return `This day cleared 500M ${metricShort()} tokens and still tried to look casual.`;
   }
   if (Number(day.sessionDurationSeconds || 0) >= 20 * 60 * 60) {
-    return "The session length nearly ate the whole calendar square.";
+    return "The active time nearly ate the whole calendar square.";
   }
   if (Number(day.modelCalls || 0) >= 5000) {
     return "Call volume crossed into queue-management territory.";
@@ -687,7 +793,7 @@ function updateSelectedIncident(day = moments.peakDay, source = "Peak Day") {
   const topValue = metricValue(top);
   const tokenLabel = state.metric === "cost"
     ? "Spend"
-    : (METRIC_SHORT[state.metric] === "total" ? "Tokens" : `${METRIC_SHORT[state.metric].replace(/^./, (c) => c.toUpperCase())} tokens`);
+    : (metricShort() === "total" ? "Tokens" : `${metricShort().replace(/^./, (c) => c.toUpperCase())} tokens`);
   const topLabel = state.metric === "cost" ? "Top Spend" : `Top ${tokenLabel}`;
   setHtml(
     els.selectedIncident,
@@ -717,7 +823,7 @@ function tickerItems() {
     peak && {
       label: "Peak day",
       value: formatMetric(metricValue(peak)),
-      detail: `${formatDate(peak.date)} carried ${formatMetric(metricValue(peak), "full")} ${METRIC_LABEL[state.metric]}.`,
+      detail: `${formatDate(peak.date)} carried ${formatMetric(metricValue(peak), "full")} ${metricLabel()}.`,
     },
     longest && {
       label: "Longest session",
@@ -790,7 +896,7 @@ function achievementItems() {
             ? "Approx. Spend"
             : "Total Stack",
       value: formatMetric(moments.totalTokens),
-      detail: `The receipt is measured in ${METRIC_LABEL[state.metric]}.`,
+      detail: `The receipt is measured in ${metricLabel()}.`,
     },
     peak && {
       title: "Peak Day",
@@ -860,11 +966,11 @@ function updateHeroReceipts() {
   const rangeDays = getRangeDays();
 
   setText(els.heroTotal, formatMetric(moments.totalTokens));
-  setText(els.heroTotalUnit, METRIC_UNIT[state.metric]);
+  setHtml(els.heroTotalUnit, metricUnitHtml());
 
   if (els.planPill) {
     const perMonth = Number(PLAN.usdPerMonth || 0);
-    if (state.metric === "cost" && perMonth > 0 && rangeDays.length > 0) {
+    if (perMonth > 0 && rangeDays.length > 0) {
       const rangeCost = rangeDays.reduce((acc, day) => acc + metricValue(day, "cost"), 0);
       const planCost = planCostForRange(rangeDays);
       const ratio = planCost > 0 ? rangeCost / planCost : 0;
@@ -922,19 +1028,44 @@ function updateSummary() {
   setText(els.topModel, topModel ? topModel.name : "--");
   setText(
     els.topModelShare,
-    topModel ? `${percentLabel(metricValue(topModel), totalTokens)} of ${METRIC_SHORT[state.metric]}` : "--",
+    topModel ? `${percentLabel(metricValue(topModel), totalTokens)} of ${metricShort()}` : "--",
   );
+}
+
+function updateMetricControls() {
+  document.querySelectorAll("[data-metric]").forEach((button) => {
+    const meta = METRIC_META[button.dataset.metric];
+    if (!meta) return;
+    setText(button, meta.buttonLabel);
+    button.title = meta.description;
+    button.setAttribute("aria-label", `${meta.buttonLabel}: ${meta.description}`);
+    button.classList.toggle("active", button.dataset.metric === state.metric);
+  });
+  setText(els.chartTitle, metricMeta().chartTitle);
 }
 
 function updateModelMix(days) {
   const modelRows = sumModels(days);
+  const unattributedTotals = hiddenModelTotals(days);
+  const unattributedValue = metricValue(unattributedTotals);
+  const rowsWithFallback = unattributedValue > 0
+    ? [
+        ...modelRows,
+        {
+          ...unattributedTotals,
+          name: OTHER_MODEL_LABEL,
+          provider: "Unattributed",
+          synthetic: true,
+        },
+      ].sort((a, b) => metricValue(b) - metricValue(a))
+    : modelRows;
   const total = state.metric === "cost"
-    ? modelRows.reduce((acc, m) => acc + metricValue(m), 0)
+    ? rowsWithFallback.reduce((acc, m) => acc + metricValue(m), 0)
     : metricValue(sumDays(days));
   const availableHeight = Number(els.modelMix?.clientHeight || 0);
   const rowBudget = availableHeight ? Math.max(Math.floor(availableHeight / 43), 1) : 8;
-  const visibleCount = Math.min(modelRows.length, rowBudget, 8);
-  const visibleRows = modelRows.slice(0, visibleCount);
+  const visibleCount = Math.min(rowsWithFallback.length, rowBudget, 8);
+  const visibleRows = rowsWithFallback.slice(0, visibleCount);
 
   if (els.modelMix) {
     els.modelMix.classList.toggle("sparse", visibleRows.length > 0 && visibleRows.length <= 3);
@@ -951,9 +1082,13 @@ function updateModelMix(days) {
         const width = total ? Math.max((value / total) * 100, 1) : 0;
         const provider = providerLabel(model);
         const isIsolated = state.isolatedModel === model.name;
-        const rowClass = `model-row${isIsolated ? " isolated" : ""}`;
+        const isSynthetic = Boolean(model.synthetic);
+        const rowClass = `model-row${isIsolated ? " isolated" : ""}${isSynthetic ? " synthetic" : ""}`;
+        const rowAttrs = isSynthetic
+          ? `aria-disabled="true" title="Usage counted from logs that did not carry a model label"`
+          : `data-model="${escapeHtml(model.name)}" role="button" tabindex="0" aria-pressed="${isIsolated}" title="Click to isolate ${escapeHtml(model.name)} in the chart"`;
         return `
-          <div class="${rowClass}" data-model="${escapeHtml(model.name)}" role="button" tabindex="0" aria-pressed="${isIsolated}" title="Click to isolate ${escapeHtml(model.name)} in the chart">
+          <div class="${rowClass}" ${rowAttrs}>
             <div>
               <span title="${escapeHtml(modelTitle(model))}">
                 <i style="background:${colorForModel(model.name)}"></i>
@@ -998,13 +1133,17 @@ function updateCapture(days) {
 
 function setupCanvas() {
   const canvas = els.chart;
-  const rect = canvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  canvas.width = Math.max(Math.floor(rect.width * dpr), 1);
-  canvas.height = Math.max(Math.floor(rect.height * dpr), 1);
+  const cssWidth = Math.max(canvas.clientWidth, 1);
+  const cssHeight = Math.max(canvas.clientHeight, 1);
+  const backingWidth = Math.max(Math.round(cssWidth * dpr), 1);
+  const backingHeight = Math.max(Math.round(cssHeight * dpr), 1);
+  if (canvas.width !== backingWidth) canvas.width = backingWidth;
+  if (canvas.height !== backingHeight) canvas.height = backingHeight;
   const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  return { ctx, width: rect.width, height: rect.height };
+  return { ctx, width: cssWidth, height: cssHeight };
 }
 
 function drawEmptyChart(ctx, width, height) {
@@ -1047,6 +1186,14 @@ function chartY(value, maxValue, pad, plotH) {
   return pad.top + plotH - (Number(value || 0) / maxValue) * plotH;
 }
 
+function px(value) {
+  return Math.round(value) + 0.5;
+}
+
+function whole(value) {
+  return Math.round(value);
+}
+
 function drawStar(ctx, cx, cy, outerRadius = 6, innerRadius = 2.8) {
   ctx.beginPath();
   for (let point = 0; point < 10; point += 1) {
@@ -1060,42 +1207,72 @@ function drawStar(ctx, cx, cy, outerRadius = 6, innerRadius = 2.8) {
   ctx.closePath();
 }
 
-function drawPillLabel(ctx, text, x, y, options = {}) {
+function resolvePillLabelRect(ctx, text, x, y, options = {}) {
   const {
     align = "left",
-    color = "#d7ff45",
-    background = "rgba(8, 10, 10, 0.82)",
     bounds = null,
     star = false,
   } = options;
-  ctx.save();
-  ctx.font = "800 11px SFMono-Regular, Consolas, monospace";
+  ctx.font = "900 12px SFMono-Regular, Consolas, monospace";
   const paddingX = 8;
-  const paddingY = 5;
   const starSpace = star ? 18 : 0;
   const metrics = ctx.measureText(text);
-  const width = metrics.width + paddingX * 2 + starSpace;
-  const height = 22;
-  let left = align === "right" ? x - width : x;
+  const width = Math.ceil(metrics.width + paddingX * 2 + starSpace);
+  const height = 24;
+  let left = x;
+  if (align === "right") left = x - width;
+  if (align === "center") left = x - width / 2;
   if (bounds) {
-    left = Math.min(Math.max(left, bounds.left), bounds.right - width);
+    const maxLeft = Math.max(bounds.left, bounds.right - width);
+    left = Math.min(Math.max(left, bounds.left), maxLeft);
     y = Math.min(Math.max(y, bounds.top + height / 2), bounds.bottom - height / 2);
   }
-  roundedRect(ctx, left, y - height / 2, width, height, 5);
+  return {
+    left: whole(left),
+    right: whole(left) + width,
+    top: whole(y - height / 2),
+    bottom: whole(y - height / 2) + height,
+    width,
+    height,
+    y: whole(y),
+    paddingX,
+    starSpace,
+  };
+}
+
+function rectsOverlap(a, b, gap = 6) {
+  if (!a || !b) return false;
+  return !(
+    a.right + gap <= b.left
+    || b.right + gap <= a.left
+    || a.bottom + gap <= b.top
+    || b.bottom + gap <= a.top
+  );
+}
+
+function drawPillLabel(ctx, text, x, y, options = {}) {
+  const {
+    color = "#d7ff45",
+    background = "rgba(8, 10, 10, 0.82)",
+  } = options;
+  ctx.save();
+  const rect = resolvePillLabelRect(ctx, text, x, y, options);
+  roundedRect(ctx, rect.left, rect.top, rect.width, rect.height, 5);
   ctx.fillStyle = background;
   ctx.fill();
   ctx.strokeStyle = rgba(color, 0.5);
   ctx.stroke();
-  if (star) {
-    drawStar(ctx, left + paddingX + 6, y, 5.5, 2.6);
+  if (options.star) {
+    drawStar(ctx, rect.left + rect.paddingX + 6, rect.y, 5.5, 2.6);
     ctx.fillStyle = color;
     ctx.fill();
   }
   ctx.fillStyle = color;
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  ctx.fillText(text, left + paddingX + starSpace, y);
+  ctx.fillText(text, rect.left + rect.paddingX + rect.starSpace, rect.y);
   ctx.restore();
+  return rect;
 }
 
 function drawChart() {
@@ -1110,9 +1287,10 @@ function drawChart() {
   }
 
   const compact = width < 620;
+  const showActiveTime = state.showSessionLine;
   const pad = compact
-    ? { top: 44, right: state.showSessionLine ? 48 : 26, bottom: 54, left: 54 }
-    : { top: 54, right: state.showSessionLine ? 82 : 34, bottom: 62, left: 76 };
+    ? { top: showActiveTime ? 34 : 24, right: showActiveTime ? 44 : 18, bottom: 54, left: 54 }
+    : { top: showActiveTime ? 38 : 24, right: showActiveTime ? 72 : 22, bottom: 62, left: 76 };
   const plotW = Math.max(width - pad.left - pad.right, 1);
   const plotH = Math.max(height - pad.top - pad.bottom, 1);
   const step = plotW / days.length;
@@ -1124,7 +1302,7 @@ function drawChart() {
     return entry ? metricValue(entry) : 0;
   };
   const maxTokens = Math.max(...days.map(dayChartValue), 1);
-  const tokenMax = Math.max(maxTokens * 1.08, 1);
+  const tokenMax = Math.max(maxTokens * (showActiveTime ? 1.025 : 1.005), 1);
   const maxDuration = Math.max(...days.map((day) => day.sessionDurationSeconds || 0), 60 * 60);
   const durationMax = Math.max(maxDuration, 24 * 60 * 60);
   const orderedModels = isolated ? [isolated] : modelRows.map((model) => model.name);
@@ -1166,63 +1344,67 @@ function drawChart() {
   ctx.textBaseline = "middle";
 
   for (let i = 0; i <= 4; i += 1) {
-    const y = pad.top + (plotH / 4) * i;
+    const y = px(pad.top + (plotH / 4) * i);
     const tokenValue = tokenMax - (tokenMax / 4) * i;
     ctx.beginPath();
-    ctx.moveTo(pad.left, y);
-    ctx.lineTo(width - pad.right, y);
+    ctx.moveTo(px(pad.left), y);
+    ctx.lineTo(px(width - pad.right), y);
     ctx.stroke();
-    ctx.fillText(formatMetric(tokenValue), pad.left - 10, y);
+    ctx.fillText(formatMetric(tokenValue), whole(pad.left - 10), whole(y));
   }
 
   [halfBillionTokens, billionTokens].forEach((threshold) => {
     if (threshold >= tokenMax) return;
-    const y = chartY(threshold, tokenMax, pad, plotH);
+    const y = px(chartY(threshold, tokenMax, pad, plotH));
     ctx.save();
     ctx.setLineDash([7, 7]);
     ctx.strokeStyle = threshold >= billionTokens
       ? "rgba(215, 255, 69, 0.58)"
       : "rgba(255, 191, 71, 0.42)";
     ctx.beginPath();
-    ctx.moveTo(pad.left, y);
-    ctx.lineTo(width - pad.right, y);
+    ctx.moveTo(px(pad.left), y);
+    ctx.lineTo(px(width - pad.right), y);
     ctx.stroke();
     ctx.restore();
   });
 
-  if (state.showSessionLine) {
+  if (showActiveTime) {
     ctx.textBaseline = "middle";
     ctx.textAlign = "left";
     ctx.fillStyle = "#93a29f";
-    ctx.fillText(durationLabel(durationMax), width - pad.right + 12, pad.top);
-    ctx.fillText("0m", width - pad.right + 12, pad.top + plotH);
+    ctx.fillText(durationLabel(durationMax), whole(width - pad.right + 12), whole(pad.top));
+    ctx.fillText("0m", whole(width - pad.right + 12), whole(pad.top + plotH));
   }
 
   days.forEach((day, index) => {
-    const x = pad.left + index * step + (step - columnWidth) / 2;
+    const x = whole(pad.left + index * step + (step - columnWidth) / 2);
+    const barWidth = Math.max(whole(columnWidth), days.length > 80 ? 2 : 5);
     let yBase = pad.top + plotH;
-    const modelMap = new Map(visibleModels(day.models || []).map((model) => [model.name, model]));
+    const dayTotal = dayChartValue(day);
+    const segments = isolated
+      ? chartSegmentsForDay({ ...day, models: (day.models || []).filter((model) => model.name === isolated) }, orderedModels, dayTotal)
+      : chartSegmentsForDay(day, orderedModels, dayTotal);
 
     ctx.save();
-    roundedRect(ctx, x, pad.top, columnWidth, plotH, columnWidth / 2);
+    roundedRect(ctx, x, whole(pad.top), barWidth, whole(plotH), barWidth / 2);
     ctx.fillStyle = "rgba(255, 255, 255, 0.025)";
     ctx.fill();
     ctx.restore();
 
-    orderedModels.forEach((modelName) => {
-      const modelEntry = modelMap.get(modelName);
-      const value = modelEntry ? metricValue(modelEntry) : 0;
-      if (!value) return;
+    segments.forEach((segment) => {
+      const value = segment.value;
       const segmentHeight = Math.max((value / tokenMax) * plotH, 1.25);
       yBase -= segmentHeight;
-      const color = colorForModel(modelName);
+      const segmentY = whole(yBase);
+      const crispSegmentHeight = Math.max(whole(segmentHeight), 1);
+      const color = segment.color;
       ctx.save();
-      ctx.shadowColor = rgba(color, index === hoverIndex ? 0.7 : 0.3);
-      ctx.shadowBlur = index === hoverIndex ? 16 : 8;
-      const barGradient = ctx.createLinearGradient(0, yBase, 0, yBase + segmentHeight);
-      barGradient.addColorStop(0, rgba(color, index === hoverIndex ? 1 : 0.9));
-      barGradient.addColorStop(1, rgba(color, index === hoverIndex ? 0.72 : 0.55));
-      roundedRect(ctx, x, yBase, columnWidth, segmentHeight, Math.min(4, columnWidth / 2));
+      ctx.shadowColor = rgba(color, index === hoverIndex ? 0.46 : 0.18);
+      ctx.shadowBlur = index === hoverIndex ? 7 : 2.5;
+      const barGradient = ctx.createLinearGradient(0, segmentY, 0, segmentY + crispSegmentHeight);
+      barGradient.addColorStop(0, rgba(color, index === hoverIndex ? 1 : 0.96));
+      barGradient.addColorStop(1, rgba(color, index === hoverIndex ? 0.82 : 0.68));
+      roundedRect(ctx, x, segmentY, barWidth, crispSegmentHeight, Math.min(4, barWidth / 2));
       ctx.fillStyle = barGradient;
       ctx.fill();
       ctx.restore();
@@ -1230,7 +1412,7 @@ function drawChart() {
 
     if (index === hoverIndex) {
       ctx.save();
-      roundedRect(ctx, x - 3, yBase - 3, columnWidth + 6, pad.top + plotH - yBase + 6, 6);
+      roundedRect(ctx, x - 3, whole(yBase) - 3, barWidth + 6, whole(pad.top + plotH - yBase) + 6, 6);
       ctx.strokeStyle = "rgba(245, 241, 232, 0.72)";
       ctx.lineWidth = 1.5;
       ctx.stroke();
@@ -1239,17 +1421,17 @@ function drawChart() {
   });
 
   const sessionPoints = days.map((day, index) => ({
-    x: pad.left + index * step + step / 2,
-    y: chartY(day.sessionDurationSeconds || 0, durationMax, pad, plotH),
+    x: whole(pad.left + index * step + step / 2),
+    y: whole(chartY(day.sessionDurationSeconds || 0, durationMax, pad, plotH)),
     day,
   }));
 
-  if (state.showSessionLine) {
+  if (showActiveTime) {
     ctx.save();
-    ctx.strokeStyle = "rgba(255, 191, 71, 0.22)";
-    ctx.lineWidth = compact ? 6 : 8;
-    ctx.shadowColor = "rgba(255, 191, 71, 0.42)";
-    ctx.shadowBlur = 18;
+    ctx.strokeStyle = "rgba(255, 191, 71, 0.18)";
+    ctx.lineWidth = compact ? 4.5 : 5.5;
+    ctx.shadowColor = "rgba(255, 191, 71, 0.24)";
+    ctx.shadowBlur = 7;
     ctx.beginPath();
     sessionPoints.forEach(({ x, y }, index) => {
       if (index === 0) ctx.moveTo(x, y);
@@ -1287,16 +1469,23 @@ function drawChart() {
     top: pad.top + 8,
     bottom: pad.top + plotH - 8,
   };
-  const rangePeakDay = isolated
-    ? days.reduce((best, day) => (!best || dayChartValue(day) > dayChartValue(best) ? day : best), null)
-    : maxDayBy(days, "totalTokens");
-  const rangeLongestDay = maxDayBy(days, "sessionDurationSeconds");
+  const rangePeakDay = days.reduce((best, day) => {
+    const value = dayChartValue(day);
+    if (value <= 0) return best;
+    if (!best || value > dayChartValue(best)) return day;
+    if (value === dayChartValue(best) && String(day?.date || "") > String(best?.date || "")) return day;
+    return best;
+  }, null);
+  const rangeLongestDay = showActiveTime ? maxDayBy(days, "sessionDurationSeconds") : null;
   const peakIndex = days.findIndex((day) => day.date === rangePeakDay?.date);
+  let metricRecordRect = null;
   if (!compact && peakIndex >= 0 && rangePeakDay && dayChartValue(rangePeakDay) > 0) {
     const day = days[peakIndex];
-    const label = state.metric === "cost" ? "Most spend" : `Most ${METRIC_SHORT[state.metric]}`;
-    drawPillLabel(ctx, `${label}: ${formatMetric(dayChartValue(day))}`, recordBounds.right, recordBounds.top + 18, {
-      align: "right",
+    const label = metricMeta().recordLabel;
+    const peakX = pad.left + peakIndex * step + step / 2;
+    const peakY = chartY(dayChartValue(day), tokenMax, pad, plotH);
+    metricRecordRect = drawPillLabel(ctx, `${label}: ${formatMetric(dayChartValue(day))}`, peakX, peakY - 17, {
+      align: "center",
       color: "#d7ff45",
       background: "rgba(8, 10, 10, 0.88)",
       bounds: recordBounds,
@@ -1305,15 +1494,54 @@ function drawChart() {
   }
 
   const longestIndex = days.findIndex((day) => day.date === rangeLongestDay?.date);
-  if (state.showSessionLine && !compact && longestIndex >= 0 && rangeLongestDay) {
+  if (showActiveTime && !compact && longestIndex >= 0 && rangeLongestDay) {
     const day = days[longestIndex];
-    drawPillLabel(ctx, `Most active day: ${durationHoursLabel(day.sessionDurationSeconds)}`, recordBounds.right, recordBounds.top + 46, {
-      align: "right",
-      color: "#ffbf47",
-      background: "rgba(8, 10, 10, 0.88)",
+    const activeText = `Most active day: ${durationHoursLabel(day.sessionDurationSeconds)}`;
+    const activeX = pad.left + longestIndex * step + step / 2;
+    const activePoint = sessionPoints[longestIndex];
+    const activePointY = activePoint?.y || recordBounds.top;
+    const activeRectProbe = resolvePillLabelRect(ctx, activeText, activeX, activePointY, {
+      align: "center",
       bounds: recordBounds,
       star: true,
     });
+    const candidatePoints = [
+      [activeX, activePointY + 26],
+      [activeX, activePointY - 26],
+      [activeX, activePointY + 54],
+      [activeX, activePointY - 54],
+      [activeX - activeRectProbe.width / 2 - 16, activePointY + 8],
+      [activeX + activeRectProbe.width / 2 + 16, activePointY + 8],
+      [recordBounds.left, activePointY + 8, "left"],
+      [recordBounds.right, activePointY + 8, "right"],
+    ];
+    let activeLabelX = activeX;
+    let activeLabelY = activePointY + 26;
+    let activeAlign = "center";
+    let activeRect = null;
+    for (const [candidateX, candidateY, candidateAlign = "center"] of candidatePoints) {
+      const candidateRect = resolvePillLabelRect(ctx, activeText, candidateX, candidateY, {
+        align: candidateAlign,
+        bounds: recordBounds,
+        star: true,
+      });
+      if (!rectsOverlap(metricRecordRect, candidateRect, 4)) {
+        activeRect = candidateRect;
+        activeLabelX = candidateX;
+        activeLabelY = candidateY;
+        activeAlign = candidateAlign;
+        break;
+      }
+    }
+    if (activeRect) {
+      drawPillLabel(ctx, activeText, activeLabelX, activeLabelY, {
+        align: activeAlign,
+        color: "#ffbf47",
+        background: "rgba(8, 10, 10, 0.88)",
+        bounds: recordBounds,
+        star: true,
+      });
+    }
   }
 
   if (hoverIndex !== null && days[hoverIndex]) {
@@ -1324,7 +1552,7 @@ function drawChart() {
     ctx.moveTo(x, pad.top);
     ctx.lineTo(x, pad.top + plotH);
     ctx.stroke();
-    if (state.showSessionLine) {
+    if (showActiveTime) {
       const y = chartY(days[hoverIndex].sessionDurationSeconds || 0, durationMax, pad, plotH);
       ctx.fillStyle = "#fff3b0";
       ctx.beginPath();
@@ -1340,17 +1568,17 @@ function drawChart() {
   const tickCount = Math.min(compact ? 4 : 6, days.length);
   for (let i = 0; i < tickCount; i += 1) {
     const index = Math.round((i / Math.max(tickCount - 1, 1)) * (days.length - 1));
-    const x = pad.left + index * step + step / 2;
-    ctx.fillText(formatDate(days[index].date), x, height - 28);
+    const x = whole(pad.left + index * step + step / 2);
+    ctx.fillText(formatDate(days[index].date), x, whole(height - 28));
   }
 
   setText(
     els.rangeCaption,
     isolated
       ? `${fullNumber(days.length)} days | isolated: ${isolated} (click it again to clear)`
-      : `${fullNumber(days.length)} days | bars = ${METRIC_LABEL[state.metric]}`,
+      : `${fullNumber(days.length)} days | bars = ${metricMeta().rangeLabel}`,
   );
-  els.rangeCaption.title = "Session length is the time between the first counted token event and the last counted token event in each local day.";
+  els.rangeCaption.title = "Active Time Per Day: Length of time where any tool was generating tokens without a 2 hour gap.";
   updateTooltip(days);
 }
 
@@ -1363,7 +1591,17 @@ function updateTooltip(days) {
   const day = days[state.hoveredIndex];
   const chartRect = els.chart.getBoundingClientRect();
   const left = Math.min(Math.max(state.pointerX || chartRect.width / 2, 190), chartRect.width - 190);
-  const rows = [...visibleModels(day.models || [])]
+  const tooltipModels = state.isolatedModel
+    ? visibleModels(day.models || []).filter((model) => model.name === state.isolatedModel)
+    : visibleModels(day.models || []);
+  const tooltipTotal = state.isolatedModel
+    ? metricValue(tooltipModels[0] || {})
+    : metricValue(day);
+  const visibleTotal = tooltipModels.reduce((sum, model) => sum + metricValue(model), 0);
+  const remainder = state.isolatedModel
+    ? 0
+    : Math.max(tooltipTotal - visibleTotal, 0);
+  const rows = [...tooltipModels]
     .sort((a, b) => metricValue(b) - metricValue(a))
     .slice(0, 5)
     .map(
@@ -1376,16 +1614,25 @@ function updateTooltip(days) {
       `,
     )
     .join("");
+  const otherRow = remainder > Math.max(tooltipTotal * 0.001, 0.01)
+    ? `
+        <span class="tip-row" title="Unattributed or hidden model usage included in the daily total">
+          <i style="background:${OTHER_MODEL_COLOR}"></i>
+          <em>${OTHER_MODEL_LABEL}</em>
+          <b>${formatMetric(remainder)}</b>
+        </span>
+      `
+    : "";
 
   els.tooltip.hidden = false;
   els.tooltip.innerHTML = `
     <span class="tip-date">${formatDateLong(day.date)}</span>
-    <strong class="tip-total">${formatMetric(metricValue(day), "full")} ${METRIC_LABEL[state.metric]}</strong>
+    <strong class="tip-total">${formatMetric(tooltipTotal, "full")} ${metricTooltipLabelHtml()}</strong>
     <div class="tip-metrics">
-      <span><b>${durationLabel(day.sessionDurationSeconds)}</b><em>session length</em></span>
+      <span><b>${durationLabel(day.sessionDurationSeconds)}</b><em>Active Time</em></span>
       <span><b>${fullNumber(day.modelCalls)}</b><em>calls</em></span>
     </div>
-    <div class="tip-models">${rows}</div>
+    <div class="tip-models">${rows}${otherRow}</div>
   `;
 
   // Place above the pointer by default, but flip below when a tall peak leaves
@@ -1432,26 +1679,21 @@ function updateTable(days) {
 
 function heatColor(intensity) {
   if (intensity <= 0) return "rgba(245, 241, 232, 0.06)";
-  const stops = [
-    [0.12, [60, 80, 70]],
-    [0.28, [88, 214, 201]],
-    [0.55, [95, 240, 178]],
-    [0.80, [215, 255, 69]],
-    [1.00, [255, 191, 71]],
+  const adjusted = Math.pow(Math.min(Math.max(intensity, 0), 1), 0.72);
+  const ramp = [
+    [0.08, "rgb(30, 50, 54)"],
+    [0.18, "rgb(32, 112, 124)"],
+    [0.30, "rgb(98, 216, 255)"],
+    [0.44, "rgb(117, 167, 255)"],
+    [0.60, "rgb(100, 240, 174)"],
+    [0.76, "rgb(215, 255, 69)"],
+    [0.90, "rgb(255, 191, 71)"],
+    [1.00, "rgb(255, 95, 135)"],
   ];
-  for (let i = 0; i < stops.length; i += 1) {
-    if (intensity <= stops[i][0]) {
-      const prev = i === 0 ? [0, [40, 60, 55]] : stops[i - 1];
-      const next = stops[i];
-      const span = next[0] - prev[0] || 1;
-      const t = (intensity - prev[0]) / span;
-      const r = Math.round(prev[1][0] + (next[1][0] - prev[1][0]) * t);
-      const g = Math.round(prev[1][1] + (next[1][1] - prev[1][1]) * t);
-      const b = Math.round(prev[1][2] + (next[1][2] - prev[1][2]) * t);
-      return `rgb(${r}, ${g}, ${b})`;
-    }
+  for (const [limit, color] of ramp) {
+    if (adjusted <= limit) return color;
   }
-  return "rgb(255, 191, 71)";
+  return ramp[ramp.length - 1][1];
 }
 
 const DOW_LONG = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -1480,8 +1722,7 @@ function heatmapWindow() {
   }
   const year = Number(state.heatmapPeriod);
   const start = new Date(year, 0, 1, 12, 0, 0, 0);
-  let end = new Date(year, 11, 31, 12, 0, 0, 0);
-  if (end > today) end = today; // current year cuts short at today
+  const end = new Date(year, 11, 31, 12, 0, 0, 0);
   return { start, end };
 }
 
@@ -1566,12 +1807,43 @@ function updateHeatmap() {
   const periodLabel = state.heatmapPeriod === "12mo" ? "trailing 12 months" : state.heatmapPeriod;
   setText(
     els.heatmapCaption,
-    `${fullNumber(activeDays)} active days in ${periodLabel} · color = ${METRIC_LABEL[state.metric]}`,
+    `${fullNumber(activeDays)} active days in ${periodLabel} · color = ${metricLabel()}`,
   );
   if (els.heatmapLegend) {
     const ramp = [0.05, 0.25, 0.5, 0.75, 1].map((step) => `<i style="background:${heatColor(step)}"></i>`).join("");
     els.heatmapLegend.innerHTML = `less ${ramp} more`;
   }
+}
+
+function scrollHeatmapToTodayOnMobile(behavior = "smooth") {
+  if (!els.heatmapScroll || !els.heatmapWrap) return;
+  if (!window.matchMedia?.("(max-width: 620px)").matches) return;
+
+  const todayIso = isoLocal(new Date());
+  let target = els.heatmapWrap.querySelector(`.heatmap-cell[data-date="${todayIso}"]`);
+  if (!target) {
+    const datedCells = [...els.heatmapWrap.querySelectorAll(".heatmap-cell[data-date]")];
+    for (let i = datedCells.length - 1; i >= 0; i -= 1) {
+      if (datedCells[i].dataset.date <= todayIso) {
+        target = datedCells[i];
+        break;
+      }
+    }
+    target = target || datedCells[datedCells.length - 1];
+  }
+  if (!target) return;
+
+  const rightEdge = target.offsetLeft + target.offsetWidth;
+  const desiredLeft = rightEdge - els.heatmapScroll.clientWidth + 28;
+  const maxLeft = els.heatmapScroll.scrollWidth - els.heatmapScroll.clientWidth;
+  const nextLeft = Math.max(0, Math.min(desiredLeft, maxLeft));
+  els.heatmapScroll.scrollTo({ left: nextLeft, behavior });
+}
+
+function settleHeatmapToTodayOnMobile() {
+  requestAnimationFrame(() => scrollHeatmapToTodayOnMobile("auto"));
+  requestAnimationFrame(() => requestAnimationFrame(() => scrollHeatmapToTodayOnMobile("auto")));
+  window.setTimeout(() => scrollHeatmapToTodayOnMobile("auto"), 120);
 }
 
 function showHeatmapTip(cell) {
@@ -1585,7 +1857,7 @@ function showHeatmapTip(cell) {
   els.heatmapTip.innerHTML = `
     <span class="tip-dow">${DOW_LONG[date.getDay()]}</span>
     <span class="tip-date">${formatDateLong(iso)}</span>
-    <span class="tip-value">${value > 0 ? `${formatMetric(value, "full")} ${METRIC_LABEL[state.metric]}` : "no activity"}</span>
+    <span class="tip-value">${value > 0 ? `${formatMetric(value, "full")} ${metricLabel()}` : "no activity"}</span>
     ${value > 0 ? `<span class="tip-sub">${fullNumber(calls)} calls</span>` : ""}
   `;
   const panelRect = els.heatmapPanel.getBoundingClientRect();
@@ -1601,6 +1873,56 @@ function showHeatmapTip(cell) {
 function hideHeatmapTip() {
   if (els.heatmapTip) els.heatmapTip.hidden = true;
   els.heatmapWrap?.querySelectorAll(".heatmap-cell.is-hovered").forEach((c) => c.classList.remove("is-hovered"));
+}
+
+function hourLabel(hour) {
+  return `${String(hour).padStart(2, "0")}:00`;
+}
+
+function positionHoursTip(bar, event) {
+  if (!els.hoursTip || !els.hoursPanel) return;
+  const panelRect = els.hoursPanel.getBoundingClientRect();
+  const barRect = bar.getBoundingClientRect();
+  const margin = 12;
+  const tipWidth = els.hoursTip.offsetWidth || 260;
+  const tipHeight = els.hoursTip.offsetHeight || 100;
+  const pointerX = event?.clientX || (barRect.left + barRect.width / 2);
+  const minLeft = margin + tipWidth / 2;
+  const maxLeft = Math.max(minLeft, panelRect.width - margin - tipWidth / 2);
+  const left = Math.min(Math.max(pointerX - panelRect.left, minLeft), maxLeft);
+  const barTop = barRect.top - panelRect.top;
+  const barBottom = barRect.bottom - panelRect.top;
+  const aboveFits = barTop - tipHeight - margin >= margin;
+  let top = barTop;
+  if (aboveFits) {
+    els.hoursTip.style.transform = `translate(-50%, calc(-100% - ${margin}px))`;
+  } else {
+    const maxTop = Math.max(margin, panelRect.height - tipHeight - margin * 2);
+    top = Math.min(Math.max(barBottom, margin), maxTop);
+    els.hoursTip.style.transform = `translate(-50%, ${margin}px)`;
+  }
+  els.hoursTip.style.left = `${left}px`;
+  els.hoursTip.style.top = `${top}px`;
+}
+
+function showHoursTip(bar, hour, value, rangeTotal, event) {
+  if (!els.hoursTip || !els.hoursPanel) return;
+  const metricText = metricMeta().tooltipLabel || metricLabel();
+  els.hoursTip.innerHTML = `
+    <span class="tip-hour">${escapeHtml(hourLabel(hour))}</span>
+    <span class="tip-label">${escapeHtml(metricText)}</span>
+    <strong class="tip-value">${formatMetric(value, "full")}</strong>
+    <span class="tip-share">${percentLabel(value, rangeTotal)} Of Total</span>
+  `;
+  els.hoursTip.hidden = false;
+  els.hoursWrap?.querySelectorAll(".hour-bar.is-hovered").forEach((item) => item.classList.remove("is-hovered"));
+  bar.classList.add("is-hovered");
+  positionHoursTip(bar, event);
+}
+
+function hideHoursTip() {
+  if (els.hoursTip) els.hoursTip.hidden = true;
+  els.hoursWrap?.querySelectorAll(".hour-bar.is-hovered").forEach((item) => item.classList.remove("is-hovered"));
 }
 
 function updateHoursHistogram(days) {
@@ -1623,6 +1945,7 @@ function updateHoursHistogram(days) {
     const fallback = usage.hoursOfDay || [];
     if (!fallback.length) {
       els.hoursWrap.innerHTML = "";
+      hideHoursTip();
       setText(els.hoursCaption, "Hour data not in this build.");
       return;
     }
@@ -1631,28 +1954,41 @@ function updateHoursHistogram(days) {
       if (idx >= 0 && idx < 24) values[idx] = metricValue(bucket);
     });
   }
-  const buckets = values;
   const max = Math.max(...values, 1);
   const total = values.reduce((a, b) => a + b, 0);
+  const rangeTotal = havePerDay
+    ? (days || []).reduce((acc, day) => acc + metricValue(day), 0)
+    : total;
   const peakHour = values.indexOf(Math.max(...values));
-  const bars = buckets.map((bucket, hour) => {
-    const value = values[hour];
+  const bars = values.map((value, hour) => {
     const heightPct = (value / max) * 100;
+    const displayHour = hourLabel(hour);
+    const shareTotal = rangeTotal > 0 ? rangeTotal : total;
+    const share = percentLabel(value, shareTotal);
     const label = value > 0
-      ? `${String(hour).padStart(2, "0")}:00 · ${formatMetric(value, "full")} ${METRIC_LABEL[state.metric]}`
-      : `${String(hour).padStart(2, "0")}:00 · quiet`;
+      ? `${displayHour} · ${formatMetric(value, "full")} ${metricLabel()} · ${share} Of Total`
+      : `${displayHour} · quiet · ${share} Of Total`;
     const tick = hour % 6 === 0 ? String(hour).padStart(2, "0") : "";
     return `
-      <div class="hour-bar" data-hour="${tick}" title="${escapeHtml(label)}">
+      <div class="hour-bar" data-hour="${tick}" data-hour-index="${hour}" aria-label="${escapeHtml(label)}">
         <b style="height:${heightPct}%"></b>
       </div>
     `;
   }).join("");
   els.hoursWrap.innerHTML = bars;
+  hideHoursTip();
+  els.hoursWrap.querySelectorAll(".hour-bar").forEach((bar) => {
+    const hour = Number(bar.dataset.hourIndex);
+    const value = values[hour] || 0;
+    const shareTotal = rangeTotal > 0 ? rangeTotal : total;
+    bar.addEventListener("pointerenter", (event) => showHoursTip(bar, hour, value, shareTotal, event));
+    bar.addEventListener("pointermove", (event) => positionHoursTip(bar, event));
+    bar.addEventListener("pointerleave", hideHoursTip);
+  });
   if (total > 0) {
     setText(
       els.hoursCaption,
-      `Peak hour: ${String(peakHour).padStart(2, "0")}:00 · ${formatMetric(values[peakHour])} ${METRIC_LABEL[state.metric]}`,
+      `Peak hour: ${hourLabel(peakHour)} · ${formatMetric(values[peakHour])} ${metricLabel()}`,
     );
   } else {
     setText(els.hoursCaption, "No counted activity in any hour yet.");
@@ -1661,22 +1997,24 @@ function updateHoursHistogram(days) {
 
 function updateSubagentShare(days) {
   if (!els.subagentWrap) return;
-  const rangeTotal = days.reduce((acc, day) => acc + metricValue(day), 0);
+  const eligibleTotal = eligibleSubagentProviderTotal(days);
   const subagentTotal = days.reduce(
     (acc, day) => acc + metricValue(day.subagentUsage || {}),
     0,
   );
+  const rangeTotal = Math.max(eligibleTotal, subagentTotal);
   const mainTotal = Math.max(rangeTotal - subagentTotal, 0);
   if (rangeTotal <= 0) {
     els.subagentWrap.innerHTML = "";
-    setText(els.subagentCaption, "No counted Claude activity in range.");
+    setText(els.subagentCaption, "No counted Codex or Claude Code activity in range.");
     return;
   }
   const subagentPct = (subagentTotal / rangeTotal) * 100;
   const mainPct = (mainTotal / rangeTotal) * 100;
   els.subagentWrap.innerHTML = `
-    <div class="subagent-bar" title="${escapeHtml(`Subagents: ${formatMetric(subagentTotal, "full")}`)}">
-      <b style="width:${subagentPct.toFixed(1)}%"></b>
+    <div class="subagent-bar" title="${escapeHtml(`Subagents: ${formatMetric(subagentTotal, "full")} ${metricLabel()}`)}">
+      <b class="subagent-segment" style="width:${subagentPct.toFixed(1)}%"></b>
+      <i class="main-segment" style="left:${subagentPct.toFixed(1)}%"></i>
     </div>
     <div class="subagent-stats">
       <div>
@@ -1693,9 +2031,7 @@ function updateSubagentShare(days) {
   `;
   setText(
     els.subagentCaption,
-    subagentTotal > 0
-      ? `Subagent share of ${METRIC_LABEL[state.metric]} (Claude only).`
-      : "No subagent activity counted in this range.",
+    `${metricSentenceLabel()} across all tools`,
   );
 }
 
@@ -1832,6 +2168,7 @@ function render() {
   const days = getRangeDays();
   state.hoveredIndex = null;
   moments = buildMoments();
+  updateMetricControls();
   updatePersonalityLayer();
   updateSummary();
   updateModelMix(days);
@@ -1856,8 +2193,7 @@ document.querySelectorAll("[data-range]").forEach((button) => {
 
 document.querySelectorAll("[data-metric]").forEach((button) => {
   button.addEventListener("click", () => {
-    document.querySelectorAll("[data-metric]").forEach((btn) => btn.classList.remove("active"));
-    button.classList.add("active");
+    if (!METRIC_META[button.dataset.metric]) return;
     state.metric = button.dataset.metric;
     render();
   });
@@ -1871,6 +2207,7 @@ if (els.heatmapPeriod) {
     renderHeatmapControls();
     hideHeatmapTip();
     updateHeatmap();
+    requestAnimationFrame(() => scrollHeatmapToTodayOnMobile());
   });
 }
 
@@ -1968,3 +2305,5 @@ window.addEventListener("resize", () => {
 
 renderHeatmapControls();
 render();
+settleHeatmapToTodayOnMobile();
+window.addEventListener("load", settleHeatmapToTodayOnMobile, { once: true });
